@@ -1,0 +1,13 @@
+# Data files — re-downloadable, don't belong in git
+fda_data/*.pdf
+fda_data/*.zip
+fda_data/*.html
+fda_data/drugsatfda/
+fda_data/*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
