@@ -11,3 +11,6 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+.env
+fda_data/coa_documents/
+fda_data/coa_documents/
