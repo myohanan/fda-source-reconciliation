@@ -1,31 +1,50 @@
-# DDT Project Search scraper — next session task
+# DDT Project Search scraper — how it works
 
-## Status: endpoint works, but needs the FILTER-search call captured live.
+## STATUS: COMPLETE. The scrape succeeded.
 
-Site: https://force-dsc.my.site.com/ddt/s/  (Salesforce Aura / Experience site)
-Aura endpoint: /ddt/s/sfsites/aura?r=1  (POST, HTTP 200 confirmed)
+`fda_data/download_ddt.py` captured all 231 DDT project records into
+`fda_data/ddt_projects.csv`. This file is kept as the RECOVERY RECORD:
+the Salesforce/Aura context below expires, and if the scraper stops
+working this is how to re-capture it.
 
-## Aura context (captured, may expire — re-grab if calls fail):
-fwuid: OUcwT3JDYUZld21JQ2ZOckR1VnppUWtVMjdnTGFERUU2S3FfSVdrcU92bkExNC4xOTIuODM4ODYwOA
-app: siteforce:communityApp
-loaded APPLICATION@markup://siteforce:communityApp : 1684_KM73-ooay8cQA67rJ6OvFA
+## The site
 
-## KEY FINDING from this session:
-- The GLOBAL SEARCH BAR calls ScopedResultsDataProvider/getItems with
-  scope "ContentDocument" -> returns PDFs/documents, NOT project records. Wrong call.
+https://force-dsc.my.site.com/ddt/s/ — a Salesforce Aura / Experience
+site. Aura endpoint: `/ddt/s/sfsites/aura?r=1` (POST).
+
+## Aura context (CAPTURED — WILL EXPIRE; re-grab if calls fail)
+## The key finding (why the obvious approach fails)
+
+- The GLOBAL SEARCH BAR calls `ScopedResultsDataProvider/getItems` with
+  scope "ContentDocument" — it returns PDFs/documents, NOT project
+  records. **Wrong call.**
 - The PROJECT RECORDS come from the SEARCH OPTIONS FILTER PANEL
-  (Program / Stage / Disease / Therapeutic Area), not the global search bar.
-- Blind ApexActionController guessing failed (needs valid CSRF token + real
-  controller name). Must capture the real call live.
+  (Program / Stage / Disease / Therapeutic Area), not the search bar.
+- Blind ApexActionController guessing fails (needs a valid CSRF token
+  and the real controller name). The call must be captured live.
+- GUI clicking failed entirely. The scripted approach worked on the
+  first real attempt.
 
-## NEXT SESSION - exact capture (do the FILTER search, not the search bar):
-1. https://force-dsc.my.site.com/ddt/s/  -> DevTools -> Network -> filter "aura"
-2. In "Search Options": pick a Program (e.g. COAQP), click > to move it to Selected,
-   then click that panel's Search button.
+## To re-capture if the scraper breaks
+
+1. Open https://force-dsc.my.site.com/ddt/s/ -> DevTools -> Network ->
+   filter "aura"
+2. In "Search Options": pick a Program (e.g. COAQP), click `>` to move
+   it to Selected, then click that panel's Search button.
 3. Find the NEW aura call whose Preview tab shows PROJECT rows
-   (disease, COA/project number, stage) -- NOT PDF file results.
-4. Right-click that request -> Copy -> Copy as cURL. Paste the whole thing to Claude.
-   (Copy as cURL captures the token + exact payload -> Claude builds the scraper.)
+   (disease, COA/project number, stage) — NOT PDF file results.
+4. Right-click that request -> Copy -> Copy as cURL. That captures the
+   token and exact payload; rebuild the scraper from it.
 
-## Then: download_ddt.py POSTs that action, paginates, writes fda_data/ddt_projects.csv
-## Note: DDT data overlaps coa_submissions.csv (already have). NOT blocking.
+## Notes on the data
+
+- 231 records total; only 150 carry a DDT COA number. The other 81 are
+  non-COA drug-development tools (e.g. biomarkers). Expected.
+- `salesforceDocIds` is all zeros — dead field.
+- `appianDocIds` holds real internal EDM IDs (e.g. 224647), but they do
+  NOT resolve publicly (fda.gov/media/<id>/download 404s). The public
+  COA documents are reached instead through the per-COA landing pages —
+  see `download_coa_documents.py`.
+- `projectURL` is a raw un-evaluated Excel formula string
+  (`=HYPERLINK("...","DDT-COA-000084")`), an artifact of the capture.
+  Regex it if you need the value.
