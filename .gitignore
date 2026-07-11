@@ -14,3 +14,4 @@ venv/
 .env
 fda_data/coa_documents/
 fda_data/coa_documents/
+fda_data/coa_templates/
