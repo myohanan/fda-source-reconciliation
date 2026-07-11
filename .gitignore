@@ -15,3 +15,5 @@ venv/
 fda_data/coa_documents/
 fda_data/coa_documents/
 fda_data/coa_templates/
+fda_data/mondo.json
+fda_data/mondo_resolution_index.csv
