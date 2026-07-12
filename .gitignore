@@ -17,3 +17,5 @@ fda_data/coa_documents/
 fda_data/coa_templates/
 fda_data/mondo.json
 fda_data/mondo_resolution_index.csv
+fda_data/mesh_desc.xml
+fda_data/mesh_disease_index.csv
