@@ -152,15 +152,66 @@ post-Cures qualified at all, and 46.7% of submissions exceeded the
 published review timelines. The thinness of the corpus IS the finding
 about the program.
 
-## 7. STILL RUNNING (as of writing)
+## 7. openFDA coverage — RUN COMPLETE
 
-`download_openfda_indications.py` — full pull over all 29,198
-applications. At ~5,000 when this was written. Uses OPENFDA_API_KEY
-from `.env` (120,000 req/day with key vs 1,000 without). Writes
-`fda_data/openfda_indications.csv` at the END of the run only, so an
-interrupted run produces no file. When it completes, record here:
-- total rows written
-- the OK / NOT_FOUND / error breakdown (the real coverage number)
+`download_openfda_indications.py` finished. All 29,198 applications.
+
+- **OK (indication retrieved):     12,572  (43%)**
+- NOT_FOUND (no openFDA label):    16,624  (57%)
+- HTTP_502 / HTTP_500:                  2  (network, re-runnable)
+
+12,183 rows carry an rxcui — these feed the RxNorm coded route
+(`download_rxnorm_indications.py`).
+
+The 57% NOT_FOUND is REAL COVERAGE INFORMATION, not a failure. Older
+and discontinued products predate openFDA labeling coverage. A sample
+from the front of the file (the oldest ApplNos) matched only ~8%; the
+overall 43% reflects newer drugs clustering later. Every miss is
+recorded with a status, so the gap is visible rather than silent.
+
+Only 2 network errors across 29,198 calls.
+
+**This settles the correction in §3: Drugs@FDA is bridgeable.** 12,572
+applications now carry an indication plus coded anchors, keyed on
+ApplNo — the source the original spike called structurally
+unbridgeable.
+
+## 7b. Compendium drug resolution — RUN COMPLETE
+
+`resolve_compendium_drugs.py` finished. The validation set now connects
+to the pipeline it validates.
+
+Parsed from the 199 Compendium rows:
+- 279 drug entries, 237 distinct brands
+- 7 non-drug cells (Qualified COA references) — correctly refused, not
+  forced into a false match
+
+Resolved against openFDA:
+- **OK (brand resolved, generic corroborated):  234**
+- GENERIC_MISMATCH (flagged, NOT accepted):      15
+- NOT_A_DRUG:                                     7
+- 209/237 brands resolved (28 unknown to openFDA — older/withdrawn)
+
+The GENERIC_MISMATCH rows are the point: a brand-name collision that
+silently resolved to the wrong application would corrupt the validation
+set, which is worse than a gap in it. They are surfaced, not accepted.
+
+FDA's hand-built disease-drug links now carry ApplNo and rxcui, so they
+can be compared directly against both pipeline routes:
+
+    route 1: ApplNo -> openFDA indication text -> MONDO
+    route 2: ApplNo -> rxcui -> RxNorm may_treat -> MeSH -> MONDO
+    truth:   the Compendium's hand-built disease for that same ApplNo
+
+Three independent angles on one claim. Agreement is corroboration;
+disagreement is a finding.
+
+## 7c. STILL RUNNING
+
+`download_rxnorm_indications.py` — 11,556 distinct rxcuis. Started
+overnight. When it completes, record here:
+- rxcuis with >= 1 coded indication
+- the OK / NO_MAY_TREAT / error breakdown
 
 ## 8. Scale context (the "empty cell" problem, quantified)
 
