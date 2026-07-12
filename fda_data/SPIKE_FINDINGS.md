@@ -206,12 +206,78 @@ can be compared directly against both pipeline routes:
 Three independent angles on one claim. Agreement is corroboration;
 disagreement is a finding.
 
-## 7c. STILL RUNNING
+## 7c. RxNorm coded route — RUN COMPLETE
 
-`download_rxnorm_indications.py` — 11,556 distinct rxcuis. Started
-overnight. When it completes, record here:
-- rxcuis with >= 1 coded indication
-- the OK / NO_MAY_TREAT / error breakdown
+`download_rxnorm_indications.py` finished. 11,556 distinct rxcuis.
+
+- **rxcuis with >= 1 coded indication: 11,218 / 11,556  (97%)**
+- rows written: 91,609 (a drug averages ~8 may_treat concepts)
+
+CAVEAT ON SCOPE: MED-RT `may_treat` is BROADER than an FDA-approved
+indication. It captures therapeutic use, including off-label and
+class-level use, and returns some non-indication artifacts (e.g.
+"Drug Hypersensitivity" for aripiprazole, which is a contraindication).
+~8 concepts per drug is NOT 8 approved uses. This is a CORROBORATING
+route, not a replacement for the label.
+
+## 7d. The MeSH -> MONDO join: 70%, and the 30% is INFORMATION
+
+Route 2 depends on RxNorm's MeSH IDs reaching a MONDO class. Tested on
+real data:
+
+- distinct MeSH disease IDs from RxNorm:  1,383
+- distinct MeSH IDs in MONDO xrefs:       8,089
+- **MeSH IDs that reach MONDO:  978 / 1,383  (70%)**
+
+The 405 that do NOT reach MONDO are not one failure. They are TWO, and
+conflating them would discard the finding:
+
+**(a) NOT A DISEASE ENTITY — a carving difference, not a gap.**
+MED-RT is organized for therapeutic reasoning ("what does this drug
+treat"); MONDO models disease IDENTITY. A concept can be a legitimate
+therapeutic target without being a disease entity. Observed:
+  D000006   Abdomen, Acute            (a presentation)
+  D000077260 Sleepiness               (a symptom)
+  D000087122 Mania                    (a state)
+  D000137   Acid-Base Imbalance       (a physiological derangement)
+  D000138   Acidosis
+  D000267   Tissue Adhesions          (a pathological finding)
+  D000013   Congenital Abnormalities  (a category header)
+  D000081207 Primary Immunodeficiency Diseases  (a category header)
+These are BOTH CORRECT. The two ontologies are answering different
+questions. This is not a miss to be patched.
+
+**(b) XREF GAP — a real disease MONDO knows, whose MeSH cross-reference
+is simply not populated.** Observed:
+  D000152    Acne Vulgaris
+  D000080223 Chronic Urticaria
+  D000098943 Uveal Melanoma
+  D000086002 Mesothelioma, Malignant
+  D000077216 Carcinoma, Ovarian Epithelial
+  D000070779 Giant Cell Tumor of Tendon Sheath
+These almost certainly EXIST in MONDO under their own labels; only the
+xref is missing.
+
+**ARCHITECTURAL CONSEQUENCE.** A resolver that treats "MeSH ID absent
+from MONDO" as a single failure state throws information away. The
+honest states are at least three:
+
+  RESOLVED             reaches a MONDO class
+  NOT_A_DISEASE_ENTITY MED-RT's target is not a disease in MONDO's
+                       model. A carving difference. NOT a gap.
+  XREF_GAP             a real disease MONDO knows but has not
+                       cross-referenced to MeSH. A genuine gap.
+
+**OPEN, NOT YET BUILT:** the XREF_GAP class is recoverable by resolving
+the MeSH LABEL against MONDO's labels and synonyms, instead of against
+the xref. That is a second angle on the same object -- resolution, not
+an exception rule -- and it should lift the effective rate well above
+70% without a single hand-coded case. Decide whether to build it.
+
+This is the multi-authority carving problem, measured: the vocabularies
+do not merely disagree, they cut the world differently, and the
+difference is substantive. Any single authority silently imposes its own
+angle and the pipeline cannot see that it has done so.
 
 ## 8. Scale context (the "empty cell" problem, quantified)
 
