@@ -1,289 +1,199 @@
 # Spike Findings — FDA Source Reconciliation
 
-Status as of July 11, 2026. One item still running (see §7).
+Data as of July 12, 2026. Architecture and reasoning live in
+`PLANNING.md`.
 
 ## 1. Sources on disk (all in fda_data/)
 
-| Source | File | Key | Rows |
+| Source | File | Key | Size |
 |---|---|---|---|
-| Drugs@FDA | `drugsatfda/` (12 tab-sep tables) | ApplNo + ApplType | 29,198 applications |
-| openFDA indications | `openfda_indications.csv` | ApplNo | RUN IN PROGRESS |
-| COA Compendium | `coa_compendium.csv` (from PDF) | disease name | 199 |
-| COA Submissions | `coa_submissions.csv` (from HTML) | DDT COA # | 72 |
-| Qualified COAs | `qualified_coas.csv` (from HTML) | DDT COA # | 7 |
-| DDT Project Search | `ddt_projects.csv` (Playwright scrape) | ddtProjectNumber | 231 |
+| Drugs@FDA | `drugsatfda/` (12 tables) | ApplNo + ApplType | 29,198 applications |
+| openFDA indications | `openfda_indications.csv` | ApplNo | 12,572 of 29,198 matched (43%) |
+| RxNorm may_treat | `rxnorm_indications.csv` | rxcui -> MeSH | 11,218 of 11,556 rxcuis (97%) |
+| COA Compendium | `coa_compendium.csv` | disease name | 199 rows (June 2021 snapshot) |
+| Compendium drugs resolved | `compendium_drugs_resolved.csv` | ApplNo + rxcui | 234 OK, 15 flagged |
+| COA Submissions | `coa_submissions.csv` | DDT COA # | 72 |
+| Qualified COAs | `qualified_coas.csv` | DDT COA # | 7 |
+| DDT Project Search | `ddt_projects.csv` | ddtProjectNumber | 231 |
 | COA documents | `coa_documents/` | DDT COA # | 143 PDFs |
 | COA templates | `coa_templates/` | n/a | 6 PDFs |
+| MONDO | `mondo.json` + `mondo_resolution_index.csv` | MONDO ID | 32,095 classes, 10,657 polyhierarchical |
+| MeSH | `mesh_desc.xml` + `mesh_disease_index.csv` | MeSH UI | 5,194 descriptors, 59,532 entry terms |
+| ICD-10-CM | `icd10cm_index.csv` | code | 74,260 codes |
+| SNOMED, MedDRA, CHV, Orphanet, HPO, NCI... | via UMLS API | CUI | ~200 vocabularies |
 
-Scripts that fetch/build each of these are committed at repo root. The
-data itself is gitignored (re-downloadable). The scripts are the record.
+Every source is reproducible from a committed script. Data is
+gitignored; the scripts are the record.
 
-## 2. The COA-number bridge — CONFIRMED on real data
+## 2. The COA-number bridge (CONFIRMED)
 
-Three sources share the DDT COA number, but each spells it differently
-and it must be normalized first (`normalize_coa_keys.py`):
+Three sources share the DDT COA number, spelled differently in each.
+`normalize_coa_keys.py` extracts a canonical 6-digit key.
 
-- `ddt_projects.csv`      ddtProjectNumber      "DDT-COA-000112"
-- `coa_submissions.csv`    (embedded in text)    "DDT COA #000112: ..."
-- `qualified_coas.csv`     (embedded in text)    "DDT COA #000084: ..."
-
-Canonical form: 6-digit zero-padded string (e.g. "000112").
-
-Confirmed overlap counts:
 - ddt_projects.csv:      150 distinct COA numbers (of 231 rows; the
-  other 81 are non-COA drug-development tools, e.g. biomarkers)
-- coa_submissions.csv:    71 distinct COA numbers
-- qualified_coas.csv:      7 distinct COA numbers
-- ddt & submissions:      71 overlap — 100% of submissions match
-- ddt & qualified:         7 overlap — 100% of qualified match
-- submissions & qualified: 0 overlap — disjoint BY DESIGN (in-process
-  vs. completed). Not an error.
-- in ddt but in neither COA file: 72 — DDT projects the public COA
-  web pages do not show. A real gap the reconciliation surfaces.
+  other 81 are non-COA drug-development tools)
+- coa_submissions.csv:    71 -- **100% match a DDT project**
+- qualified_coas.csv:      7 -- **100% match a DDT project**
+- submissions & qualified: 0 overlap -- disjoint BY DESIGN
+- in DDT but neither COA file: 72 -- projects the public COA pages do
+  not show
 
-## 3. Drugs@FDA — CORRECTION to the original spike conclusion
+## 3. Drugs@FDA IS bridgeable (corrects the original spike)
 
 The first version of this file concluded Drugs@FDA was structurally
-unbridgeable: no disease field, no shared key, therefore only fuzzy
-disease-name matching across vocabularies. **That is now superseded.**
+unbridgeable. **That is superseded.**
 
-The openFDA drug label API exposes the same drugs keyed on the SAME
-application number (`openfda.application_number`, e.g. "NDA021436"),
-and returns in the same record:
-- `indications_and_usage` — the disease/condition, as its own field
-- `rxcui`, `unii`, `pharm_class_epc` — harmonized coded identifiers
+Two independent routes, both confirmed on real data:
 
-So the bridge is: local Drugs@FDA ApplNo + ApplType -> openFDA label
--> indication text + coded anchors. The rxcui/pharm_class codes are
-the more reliable join surface; the indication text is prose (openFDA
-does not code it to MedDRA/SNOMED) and needs name-level handling.
+    route 1  ApplNo -> openFDA indications_and_usage (prose) -> resolve
+    route 2  ApplNo -> rxcui -> RxNorm may_treat -> MeSH -> resolve
+    truth    the Compendium's hand-built disease-drug links, resolved
+             to the same ApplNo
 
-Verified live on real records: NDA021436 -> ABILIFY -> schizophrenia;
-BLA761234 -> OPDUALAG; NDA020702 -> LIPITOR.
+Agreement is corroboration. Disagreement is a finding.
 
-Coverage is PARTIAL and that is expected: older/discontinued products
-predate openFDA labeling coverage and return NOT_FOUND. A 200-app
-sample from the front of the file (oldest ApplNos) matched only 16/200
-(~8%). The overall rate will be higher (newer drugs cluster later in
-the file) but a large NOT_FOUND fraction is real coverage information,
-not a failure. `download_openfda_indications.py` writes NOT_FOUND /
-ERROR / HTTP_nnn as distinct statuses so the gap is visible, never
-silent.
+openFDA coverage is 43% (12,572 / 29,198) -- the misses are older and
+discontinued products that predate openFDA labeling. Real coverage
+information, not failure; every miss carries a status.
 
-The name-matching layer is ALREADY BUILT: `fda_match_util.term_matches`
-in the rare-disease repo (whole-word boundary for terms <= 4 chars,
-substring for longer; shared by fda_agent and fda_approval_agent so
-they cannot drift). It is the right matcher for the COA abbreviations
-(CHF, CKD, AOM, CD) embedded in the FDA condition strings.
+RxNorm's MeSH -> MONDO join closes at 70%. The 30% that does not is
+NOT one failure but TWO, and conflating them discards the finding:
+- **Carving difference** (not a gap): MED-RT models therapeutic
+  TARGETS -- Acidosis, Sleepiness, Abdomen-Acute. MONDO models disease
+  IDENTITY. Both are correct; they answer different questions.
+- **Xref gap** (a real gap): Acne Vulgaris, Uveal Melanoma. Real
+  diseases MONDO knows, whose MeSH cross-reference is unpopulated.
 
-## 4. The COA Compendium is a VALIDATION SET, not just a source
+## 4. condition_resolver: 53 of 54 (98%)
 
-`extract_coa_compendium.py` pulls 199 rows from the PDF (pdfplumber
-table extraction, source page recorded per row for traceback). Each row
-carries: division, disease, context_of_use, concept, coa_tool_type,
-drug_approval.
+Validated by hand against **100% of FDA's COA catalog** -- not sampled,
+verified. That is only possible because the catalog is nearly empty,
+which is the same fact that makes it a problem.
 
-The significance: the Compendium is the ONE FDA source that already
-links, BY HAND, disease -> COA -> drug -> approval date. 198 of 199
-rows name a drug. That is a partial ground-truth set the reconciliation
-engine's joins can be checked against.
+| Resolved by | Count |
+|---|---|
+| UMLS Metathesaurus (~200 vocabularies) | 46 |
+| ClinicalTrials.gov (trial populations) | 5 |
+| Multi-name split (3 names -> 1 CUI) | 1 |
+| FDA guidance, cited | 1 |
+| **NOT_A_CONDITION (correct)** | **1** |
+| CONFLICT_DETECTED | **0** |
+| UNRESOLVED | **0** |
 
-Two caveats, both real:
-- It is dated JUNE 2021. A snapshot, not current state. It has no
-  update mechanism — a person retyped it, once. Approvals since then
-  are absent. Do not treat it as live truth.
-- Multi-drug cells ("1. Brilinta ... 2. Effient ...") and approval
-  dates are left as RAW TEXT on purpose. Splitting them is a downstream
-  decision; splitting at extraction risks silently mis-associating a
-  drug with the wrong disease.
+**Convergence is countable, not a score:**
 
-The delta between the 2021 Compendium and the live sources is itself a
-measure of how far the hand-built layer has drifted from reality.
+    Asthma              36 independent vocabularies  C0004096
+    Pain                35                           C0030193
+    Multiple Sclerosis  33                           C0026769
+    Obesity             33                           C0028754
+    Schizophrenia       31                           C0036341
 
-## 5. How the four FDA systems are actually maintained
+The one NOT_A_CONDITION is `Recovery from surgery and anesthesia`. Its
+Context of Use is "patients undergoing ALL FORMS of surgery and
+anesthesia" -- not a population. No vocabulary names it. No trial
+registers it. **FDA declined the COA at Letter of Intent** -- for
+psychometric reasons (a composite score "not sufficiently well-defined
+for regulatory use"), which is a separate fact that happens to coincide.
+The Disease/Condition field holds a clinical CONTEXT, not a condition.
 
-Confirmed from the data, not inferred:
-- COA Compendium: hand-curated PDF, organized by CDER review division
-  (34 of them), published June 2021, no update mechanism. FDA's own
-  language: it "collates and summarizes" — collates, not integrates.
-- DDT Project Search: live Salesforce/Aura app with an API underneath
-  (required a scripted capture; GUI clicking failed). Updates.
-- COA submissions / qualified: server-rendered HTML tables. Update on
-  their own cadence.
-- Drugs@FDA: periodic bulk download + openFDA API.
+## 5. FDA's condition field is written in TRIAL-ENROLLMENT language
 
-Four sources, four different update mechanisms, one of which is "a
-person retypes it every few years." That is the fingerprint of systems
-never built to talk to each other — and it is the concrete answer to
-"the foundation is already built."
+Five conditions no clinical vocabulary carries -- and every one is in
+the trial registry:
 
-## 6. COA submission documents — public, and they exist
+    Acute Bacterial Skin and Skin Structure Infection     7 trials
+    Non-Cystic Fibrosis Bronchiectasis                   11 trials
+    Community-Acquired Bacterial Pneumonia                5 trials
+    Hospital-acquired Bacterial Pneumonia                 5 trials
+    Dystrophinopathy                                      5 trials
 
-Under FD&C Act section 507 (21st Century Cures), FDA must publicly post
-COA qualification submissions and its determination letters.
+These are not disease names. They are pathogen class + anatomic site +
+acuity, or a disease with an exclusion, or an umbrella covering two
+dystrophies with one instrument (Dystrophinopathy's Context of Use:
+"Duchenne OR Becker"). A COA exists to be used IN A TRIAL, so the field
+speaks the registry's language.
 
-They are NOT on the submissions summary table, and they are NOT
-reachable via the DDT records' `appianDocIds` (internal EDM IDs; they
-404 publicly). They live on a per-COA landing page — one page per DDT
-COA number — each linking ordinary `fda.gov/media/NNNNN/download` PDFs.
-`download_coa_documents.py` crawls 63 landing pages and pulls them.
+**And a keyword approach gets this exactly wrong.** It would map
+"Non-Cystic Fibrosis Bronchiectasis" to "bronchiectasis" and SILENTLY
+ENROLL the cystic fibrosis patients FDA deliberately excluded. The
+exclusion is not noise in the name. It is the trial design.
 
-143 documents retrieved, 0 failures. Composition:
--  27  FDA Response (Accepted)
--  26  Transition Letter to 507 Process
--  26  Letter of Intent
--  13  Update
--  13  FDA Response
--   5  FDA Response (NOT Accepted)
--   4  Qualification Statement
--   3  Full Qualification Package
--   3  Qualification Plan
--   2  Review
--   2  FDA Response (Qualified)
--   1  SEALD Review
-- plus appendices
+## 6. The catalog: what is actually in it
 
-**Read the shape, not just the count.** The corpus is dominated by
-correspondence. Only 3 Full Qualification Packages and 2 Reviews exist.
-That is not a scraper failure — it is the program's actual state: most
-projects die at Letter of Intent. Published finding: 86 COAs listed, 7
-ever qualified (8.1%), 1 denied, none qualified since 2020, none
-post-Cures qualified at all, and 46.7% of submissions exceeded the
-published review timelines. The thinness of the corpus IS the finding
-about the program.
+**54 conditions. 7 ever qualified. Nothing since 2020.**
 
-## 7. openFDA coverage — RUN COMPLETE
+Dated activity across all 54 COAs:
+- 2011-2016: 29 (53%)
+- 2017-2020: 25 (46%) -- including 2019, the busiest year on record
+- **2021-2026: 0**
 
-`download_openfda_indications.py` finished. All 29,198 applications.
+The Compendium was last published **June 2021** -- it compiles work
+already done. No qualification has been added since.
 
-- **OK (indication retrieved):     12,572  (43%)**
-- NOT_FOUND (no openFDA label):    16,624  (57%)
-- HTTP_502 / HTTP_500:                  2  (network, re-runnable)
+**Absent from the catalog:** breast cancer, ovarian, cervical,
+endometrial, uterine, prostate, colorectal, pancreatic cancer.
+Myocardial infarction. Endometriosis, preeclampsia, postpartum
+depression, menopause, osteoporosis.
 
-12,183 rows carry an rxcui — these feed the RxNorm coded route
-(`download_rxnorm_indications.py`).
+The entire oncology catalog is five entries: `Cancer`, `NSCLC`, `SCLC`,
+`Renal cell carcinoma`, `Plexiform neurofibroma`.
 
-The 57% NOT_FOUND is REAL COVERAGE INFORMATION, not a failure. Older
-and discontinued products predate openFDA labeling coverage. A sample
-from the front of the file (the oldest ApplNos) matched only ~8%; the
-overall 43% reflects newer drugs clustering later. Every miss is
-recorded with a status, so the gap is visible rather than silent.
+**FDA knows tamoxifen treats breast cancer** -- it is on the approved
+label (NDA021807) and coded in RxNorm (MeSH D001943). And there is no
+qualified instrument to measure a breast cancer trial's outcomes. The
+drug exists. The endpoint does not.
 
-Only 2 network errors across 29,198 calls.
+## 7. Why a search box cannot fix this
 
-**This settles the correction in §3: Drugs@FDA is bridgeable.** 12,572
-applications now carry an indication plus coded anchors, keyed on
-ApplNo — the source the original spike called structurally
-unbridgeable.
+A developer types "breast cancer" into FDA's page and gets a blank. They
+learn NOTHING -- the blank is indistinguishable from a typo, a search
+failure, or a disease FDA never considered.
 
-## 7b. Compendium drug resolution — RUN COMPLETE
+And a keyword system has exactly ONE relation available to it: "same
+as." FDA's own data requires at least four:
 
-`resolve_compendium_drugs.py` finished. The validation set now connects
-to the pipeline it validates.
+    NSCLC              is a CHILD of lung cancer
+    SCLC               is a SIBLING of NSCLC
+    "Cancer"           is a REMOTE ANCESTOR of both
+    chronic HF         is a DIFFERENT CONCEPT from congestive HF
+                       (C0264716 vs C0018802 -- confirmed at CUI level)
 
-Parsed from the 199 Compendium rows:
-- 279 drug entries, 237 distinct brands
-- 7 non-drug cells (Qualified COA references) — correctly refused, not
-  forced into a false match
+No number of synonyms expresses a subsumption. And a synonym list can
+only contain words for things that ARE in the catalog -- so it can never
+say "breast cancer exists and we do not have it." **Absence has no
+entry to hang a keyword on.**
 
-Resolved against openFDA:
-- **OK (brand resolved, generic corroborated):  234**
-- GENERIC_MISMATCH (flagged, NOT accepted):      15
-- NOT_A_DRUG:                                     7
-- 209/237 brands resolved (28 unknown to openFDA — older/withdrawn)
+## 8. Structural: how the four FDA systems are maintained
 
-The GENERIC_MISMATCH rows are the point: a brand-name collision that
-silently resolved to the wrong application would corrupt the validation
-set, which is worse than a gap in it. They are surfaced, not accepted.
+- **COA Compendium**: hand-curated PDF, by CDER review division (34 of
+  them), published June 2021, no update mechanism. FDA's own language:
+  it "collates and summarizes" -- collates, not integrates.
+- **DDT Project Search**: live Salesforce/Aura app with an API
+  underneath. Updates. (Required a scripted capture; GUI clicking
+  failed entirely.)
+- **COA submissions / qualified**: server-rendered HTML tables.
+- **Drugs@FDA**: periodic bulk download + openFDA API.
 
-FDA's hand-built disease-drug links now carry ApplNo and rxcui, so they
-can be compared directly against both pipeline routes:
+Four sources, four update mechanisms, one of which is "a person retypes
+it every few years." That is the fingerprint of systems never built to
+talk to each other -- and it is the concrete answer to "the foundation
+is already built."
 
-    route 1: ApplNo -> openFDA indication text -> MONDO
-    route 2: ApplNo -> rxcui -> RxNorm may_treat -> MeSH -> MONDO
-    truth:   the Compendium's hand-built disease for that same ApplNo
+## 9. COA documents are public and complete
 
-Three independent angles on one claim. Agreement is corroboration;
-disagreement is a finding.
+143 documents retrieved, 0 failures. Under FD&C Act 507, FDA must post
+submissions and determination letters. They are NOT on the summary
+table and NOT reachable via the DDT records' appianDocIds (internal EDM
+IDs; they 404 publicly). They live on per-COA landing pages.
 
-## 7c. RxNorm coded route — RUN COMPLETE
+    27  FDA Response (Accepted)         5  FDA Response (NOT Accepted)
+    26  Letter of Intent                4  Qualification Statement
+    26  Transition Letter to 507        3  Full Qualification Package
+    13  Update                          3  Qualification Plan
+    13  FDA Response                    2  Review
+                                        1  SEALD Review
 
-`download_rxnorm_indications.py` finished. 11,556 distinct rxcuis.
-
-- **rxcuis with >= 1 coded indication: 11,218 / 11,556  (97%)**
-- rows written: 91,609 (a drug averages ~8 may_treat concepts)
-
-CAVEAT ON SCOPE: MED-RT `may_treat` is BROADER than an FDA-approved
-indication. It captures therapeutic use, including off-label and
-class-level use, and returns some non-indication artifacts (e.g.
-"Drug Hypersensitivity" for aripiprazole, which is a contraindication).
-~8 concepts per drug is NOT 8 approved uses. This is a CORROBORATING
-route, not a replacement for the label.
-
-## 7d. The MeSH -> MONDO join: 70%, and the 30% is INFORMATION
-
-Route 2 depends on RxNorm's MeSH IDs reaching a MONDO class. Tested on
-real data:
-
-- distinct MeSH disease IDs from RxNorm:  1,383
-- distinct MeSH IDs in MONDO xrefs:       8,089
-- **MeSH IDs that reach MONDO:  978 / 1,383  (70%)**
-
-The 405 that do NOT reach MONDO are not one failure. They are TWO, and
-conflating them would discard the finding:
-
-**(a) NOT A DISEASE ENTITY — a carving difference, not a gap.**
-MED-RT is organized for therapeutic reasoning ("what does this drug
-treat"); MONDO models disease IDENTITY. A concept can be a legitimate
-therapeutic target without being a disease entity. Observed:
-  D000006   Abdomen, Acute            (a presentation)
-  D000077260 Sleepiness               (a symptom)
-  D000087122 Mania                    (a state)
-  D000137   Acid-Base Imbalance       (a physiological derangement)
-  D000138   Acidosis
-  D000267   Tissue Adhesions          (a pathological finding)
-  D000013   Congenital Abnormalities  (a category header)
-  D000081207 Primary Immunodeficiency Diseases  (a category header)
-These are BOTH CORRECT. The two ontologies are answering different
-questions. This is not a miss to be patched.
-
-**(b) XREF GAP — a real disease MONDO knows, whose MeSH cross-reference
-is simply not populated.** Observed:
-  D000152    Acne Vulgaris
-  D000080223 Chronic Urticaria
-  D000098943 Uveal Melanoma
-  D000086002 Mesothelioma, Malignant
-  D000077216 Carcinoma, Ovarian Epithelial
-  D000070779 Giant Cell Tumor of Tendon Sheath
-These almost certainly EXIST in MONDO under their own labels; only the
-xref is missing.
-
-**ARCHITECTURAL CONSEQUENCE.** A resolver that treats "MeSH ID absent
-from MONDO" as a single failure state throws information away. The
-honest states are at least three:
-
-  RESOLVED             reaches a MONDO class
-  NOT_A_DISEASE_ENTITY MED-RT's target is not a disease in MONDO's
-                       model. A carving difference. NOT a gap.
-  XREF_GAP             a real disease MONDO knows but has not
-                       cross-referenced to MeSH. A genuine gap.
-
-**OPEN, NOT YET BUILT:** the XREF_GAP class is recoverable by resolving
-the MeSH LABEL against MONDO's labels and synonyms, instead of against
-the xref. That is a second angle on the same object -- resolution, not
-an exception rule -- and it should lift the effective rate well above
-70% without a single hand-coded case. Decide whether to build it.
-
-This is the multi-authority carving problem, measured: the vocabularies
-do not merely disagree, they cut the world differently, and the
-difference is substantive. Any single authority silently imposes its own
-angle and the pipeline cannot see that it has done so.
-
-## 8. Scale context (the "empty cell" problem, quantified)
-
-86 total COAs published (COA website + DDT combined) as of Oct 2024,
-against thousands of conditions. FDA's own research: the DDT
-qualification program has not significantly improved COA inclusion in
-clinical development, due to slow and unpredictable review timelines.
-The bottleneck is throughput — expert reviewer time — not policy. A
-webpage refresh addresses none of this.
+**Read the shape, not the count.** Only 3 Full Qualification Packages
+and 2 Reviews exist. That is not a scraper failure -- it is the
+program's actual state. Most projects die at Letter of Intent. The
+thinness of the corpus IS the finding about the program.

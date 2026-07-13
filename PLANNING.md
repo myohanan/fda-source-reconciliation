@@ -1,279 +1,290 @@
 # PLANNING.md — FDA Source Reconciliation
 
-Last updated July 11, 2026. Architecture and scope; findings live in
-`fda_data/SPIKE_FINDINGS.md`.
+Last updated July 12, 2026. Architecture and scope; data findings live
+in `fda_data/SPIKE_FINDINGS.md`.
 
 ## 0. What this is
 
 A spinoff of the rare-disease endpoint library's canonical-object
-reconciliation engine, pointed at FDA's own fragmented COA / DDT /
-Drugs@FDA data.
+engine, pointed at FDA's own fragmented COA / DDT / Drugs@FDA data.
 
-Triggered by an FDA communications response (July 9, 2026) to the
-rare-disease proposal, which pointed at existing FDA resources (COA
-Compendium, DDT Qualification Project Search, COA Qualification
-Submissions) and proposed to "refresh the current webpage" since "the
-foundation is already built."
-
-The diagnosis: that is a front-end answer to a backend problem. The
-four resources do not share a common key. A refreshed website cannot
-display connections that do not exist in the data underneath; someone
-would have to maintain every link by hand, forever — which is exactly
-how the current state was produced. Confirmed on real data, not
-inferred (see SPIKE_FINDINGS §2, §3, §5).
+Triggered by an FDA communications response (July 9, 2026) proposing to
+"refresh the current webpage" because "the foundation is already
+built." That is a front-end answer to a backend problem. The four
+resources do not share a key; a website cannot display connections that
+do not exist underneath. Confirmed on real data, not inferred.
 
 ## 1. Status
 
-**Data foundation: COMPLETE.** All sources pulled and structured. One
-run still in progress (openFDA indications, full 29,198-application
-pull — see SPIKE_FINDINGS §7).
+**Data foundation: COMPLETE.** Five FDA sources plus four terminology
+sources, all on disk, all reproducible from committed scripts.
 
-**Code: ported, not yet reconfigured.** The core files at repo root
-(`reconciliation_orchestrator.py`, `source_reconciliation_agent.py`,
-`record_schema.py`, `config.py`) are the rare-disease files, renamed.
-Their docstrings still describe disease resolution. Rewriting them for
-the FDA sources IS the next session's work.
+**condition_resolver: BUILT AND VALIDATED.** 53 of 54 FDA COA
+conditions resolved (98%), zero conflicts, one honest NOT_A_CONDITION.
+Validated by hand against 100% of the corpus -- not sampled, verified.
 
-## 2. The architecture (settled — transferred, not invented)
+**Not yet built:** hierarchy_matcher, coa_lookup, drug_lookup,
+orchestrator.
 
-The canonical-object pattern from disease/gene resolution maps directly:
+## 2. The user-facing function (one question, one answer)
 
-| Gene resolution | FDA reconciliation |
-|---|---|
-| Disease name (ambiguous label) | COA / condition / drug across sources |
-| Reconcile Orphanet/OMIM/MONDO/HGNC | Reconcile Drugs@FDA / Compendium / COA submissions / DDT |
-| disease_class -> lookup_strategy | source-type -> reconciliation-strategy (clean-key join vs. name match) |
-| Canonical Disease Object | Canonical COA / condition / drug record |
-| CONFLICT_DETECTED | Sources name the same thing differently |
-| source_of_truth governance | Which FDA source is authoritative per field |
+A developer types a disease. They get:
 
-**Why this is NOT harder than rare disease** (settled; do not
-relitigate): the FDA conditions are common diseases with mature
-ontology coverage, abbreviations come pre-embedded in the source
-strings ("Chronic Heart Failure (CHF)"), and there are ~51 unique
-conditions in the COA submissions. The Krabbe-collision / UBTF /
-FOXG1-returning-Rett problems already solved for rare disease were
-harder than anything here.
+  - what COAs exist, and their qualification status
+  - what drugs are approved
+  - what trials exist
+  - and, honestly, what does NOT exist
 
-## 3. What transfers from the rare-disease repo
+That last one is the product. FDA's current pages cannot say "we looked
+and there is nothing," because a catalog can only show its own
+contents. Absence is invisible -- indistinguishable from a typo. A
+developer searching breast cancer today gets a blank and learns
+nothing.
 
-Already built, port with little or no change:
-- **`fda_match_util.py`** — the shared deterministic term matcher
-  (whole-word boundary for terms <= 4 chars, substring for longer).
-  This IS the Drugs@FDA name-matching layer. It was built to stop
-  fda_agent and fda_approval_agent from drifting; it is exactly the
-  guard needed for short COA abbreviations (CHF, CKD, AOM, CD).
-- **`fda_agent.py`** — parses the FDA Surrogate Endpoint Table live,
-  with hardcoded fallback and an implausible-parse detector. A sixth
-  source, already built, fully deterministic.
-- **`fda_approval_agent.py`** — FDA orphan-drug database. Already
-  carries the load-failure-vs-genuine-empty discipline (degrades to
-  UNKNOWN rather than a false "no approved therapies") — the same
-  distinction `download_openfda_indications.py` encodes as
-  NOT_FOUND vs. ERROR.
-- **`clinicaltrials_agent.py`** — retrieval with pagination, dedupe by
-  NCT, and retrieved-vs-reported count reconciliation.
+Confirmed on FDA's catalog: no COA for breast cancer, ovarian, cervical,
+endometrial, prostate, colorectal, pancreatic, or myocardial infarction.
+54 conditions total. Nothing qualified since 2020.
 
-Port with reconfiguration:
-- `citation_integrity_agent.py`, `claim_verification_agent.py` — the
-  five-verdict discipline (GREEN / RED-no-mention / RED-contradiction /
-  YELLOW-unverified, with RED requiring an affirmative negative)
-  transfers; the SOURCE changes from PubMed abstract to document
-  section.
-- `orchestrator.py` — sealed-handoff discipline transfers; the step
-  sequence changes entirely.
+## 3. The architecture: three canonical objects, one resolver
 
-## 4. Generative agency in this system: almost none
+Only ONE object has an identity problem:
 
-Worth stating plainly, because it is a strength and a selling point.
+  - **Condition** -- NO key anywhere. Must be RESOLVED. This is where
+    all the architectural weight lands.
+  - **COA** -- identity GIVEN. Key: DDT COA number.
+  - **Drug application** -- identity GIVEN. Key: ApplNo.
 
-The reconciliation is: key joins (deterministic), PDF table extraction
-(deterministic), API retrieval (deterministic). The one soft spot is
-matching indication text to a canonical condition — and the right
-answer there is `fda_match_util` plus a controlled vocabulary, with
-CONFLICT_DETECTED / HUMAN_REVIEW_REQUIRED where the data is genuinely
-ambiguous. NOT a generative call.
+So: one resolver, several lookups. The lookups are joins on a resolved
+key and have no identity problem left to solve. The conductor never
+plays violin.
 
-So the FDA backend is MORE deterministic than the rare-disease
-pipeline, which needed bounded generative agency only because PubMed
-evidence synthesis requires judgment. Nothing here does.
+The interesting information lives in the EDGES, and the edges carry a
+RELATION, not just a confidence:
 
-**Terminology note (deliberate):** these are TOOLS, not agents. An
-agent selects its own goals and actions. A tool with bounded generative
+    NSCLC is a CHILD of lung cancer
+    SCLC is a SIBLING of NSCLC
+    "Cancer" is a REMOTE ANCESTOR of both
+
+Three different answers with three different regulatory meanings. A
+keyword system has exactly one relation available to it -- "same as" --
+and is structurally incapable of expressing any of them.
+
+## 4. condition_resolver: the ladder (sensitive -> specific)
+
+Modeled on sequential testing: a sensitive screen catches everything,
+then specific confirmation kills the false positives. You cannot
+confirm what you never caught, so the order is not optional.
+
+**1. SENSITIVE SCREEN -- UMLS Metathesaurus, exact search**
+   ~200 vocabularies at once, already cross-referenced, CUI as the
+   shared key. Miss nothing.
+
+**2. SPECIFIC GATES -- two of them, both deterministic**
+
+   *Semantic type.* Every UMLS concept carries a type the authority
+   PUBLISHES. This is the same move as the gene resolver, where
+   Orphanet's own disorder_type drives strategy selection: no rule is
+   written by hand, a typed field decides.
+
+   It is LOAD-BEARING, not decorative. Searching "itch" returns, ranked:
+       C1422257  ITCH gene              -> Gene or Genome        REJECT
+       C1141025  ITCH protein, human    -> Protein               REJECT
+       C0033774  Pruritus               -> Sign or Symptom       ACCEPT
+   Taking the top exact hit resolves "itch" to a GENE.
+
+   *Two-vocabulary minimum.* A concept needs >= 2 independent
+   vocabularies calling it by this name. One is not evidence.
+
+**3. DOMAIN AUTHORITY -- ClinicalTrials.gov**
+   FDA's COA condition field is written in the language of TRIAL
+   ENROLLMENT, because a COA exists to be used in a trial. "Acute
+   Bacterial Skin and Skin Structure Infection" is a pathogen class, an
+   anatomic site, and an acuity -- not a disease name. No clinical
+   vocabulary has a REASON to carry it. The registry does.
+
+**4. CITED EXCEPTION -- FDA guidance**
+   A few constructs are defined by a regulatory document, not a
+   vocabulary. Named explicitly, with a citation. Currently 1 entry.
+
+**5. HONEST REFUSAL -- NOT_A_CONDITION**
+   Nothing in ~200 vocabularies, nothing in the registry, no cited
+   guidance. That is a FINDING about FDA's catalog.
+
+## 5. Why no single vocabulary suffices (settled; do not relitigate)
+
+Each vocabulary is COMPLETE for its own question and structurally
+incomplete for ours. They do not merely disagree -- they CARVE THE
+SPACE DIFFERENTLY, and the carving follows the purpose:
+
+| Vocabulary | Built to answer | Therefore encodes | Systematically misses |
+|---|---|---|---|
+| ICD-10 | What do we bill for? | Chronicity, laterality, encounter stage | General concepts ("breast cancer" -- too vague to bill) |
+| SNOMED | What did the clinician document? | Clinical language | Little; it is the broadest |
+| MeSH | What is this paper about? | Publication terms | Clinical phrasing |
+| MedDRA | What do we report to the regulator? | FDA's own indication language | Anything outside submission |
+| CHV | What does the patient call it? | "itch," "heart attack" | Technical nomenclature |
+| Orphanet | What rare diseases exist? | Rare identity | Common disease |
+| NCI | What is this cancer? | Tumor taxonomy | Everything else -- its fracture coverage is INCIDENTAL |
+
+That last row is the rule for when a SOLE source counts. A single
+vocabulary is authoritative when it OWNS the domain and an artifact
+when it is merely passing through. NCI filing "hip fracture" under
+PELVIS is not a clinical claim; it is a curation quirk in a vocabulary
+that has no business with fractures.
+
+## 6. Hard-won lessons (each cost a wrong answer)
+
+**MONDO is a peer, not a gatekeeper.** An early version required a
+MONDO xref before a hit could count. Sarcopenia was matched exactly by
+MeSH, SNOMED, AND ICD-10 and returned UNRESOLVED, because a FOURTH
+source had a coverage gap. Worse: MONDO cross-references "hip fracture"
+to SNOMED's "Fracture of proximal end of femur" -- a NARROWER concept.
+Its xrefs are unsafe for identity. MONDO now supplies HIERARCHY ONLY.
+
+**Do not re-derive what the authority already determined.** UMLS's
+exact search matches against every ATOM and returns the concept's
+PREFERRED NAME -- "itch" returns "Pruritus." A version that re-checked
+exactness against that preferred name rejected every correct answer.
+
+**A deterministic rule can still generate an unearned claim.** A regex
+decomposed "Acute Bacterial Exacerbation of Chronic Bronchitis IN
+PATIENTS WITH COPD" into core + population restriction. But chronic
+bronchitis IS a form of COPD -- the "restriction" is the parent
+category. And FDA's own SEALD review says the clinical work is done by
+BACTERIAL, excluding non-bacterial exacerbations. The regex found
+GRAMMAR and generated MEANING. It was deterministic and still wrong --
+WORSE for being deterministic, because a reviewer would trust it. The
+decomposer was removed. This is the plausible-but-unearned failure
+mode, and it does not require a model call to occur.
+
+**Normalization bugs masquerade as vocabulary gaps.** Stripping
+apostrophes turned "Alzheimer's Disease" into "alzheimer s disease" and
+made four of the most recognizable diseases in medicine unresolvable.
+A four-line fix moved resolution from 75% to 89%.
+
+**Asymmetric normalization nearly produced a false finding.** The trial
+registry writes "Acute Bacterial Exacerbation of Chronic Bronchitis
+(ABECB)." with the abbreviation and a period. Comparing our normalized
+string against their raw string reported a false miss.
+
+**A silent path is the dangerous one.** A source that hit but yielded
+no CUI vanished with nothing logged. Every refusal is now recorded.
+
+## 7. The near-miss log is a calibration instrument
+
+Not debug output. It has OVERTURNED two design decisions
+(MONDO-as-gatekeeper; the regex decomposer) and CONFIRMED one
+(exact-match-only). Read it before loosening any rule.
+
+Exact-match-only was settled by evidence, not preference. SNOMED's
+rank-1 for "hip fracture" is "Fracture of proximal end of femur" --
+narrower, plausible, wrong, and silent. Its rank-1 for "Cancer" is
+fine; rank-3 onward is "Malignant neoplasm of stomach... of skin... of
+pancreas." SNOMED's ranking optimizes for CLINICAL RETRIEVAL, and does
+that job well. It cannot be trusted for identity.
+
+## 8. Thresholds: measured, never guessed
+
+The two-vocabulary minimum was NOT tuned. The corpus was run first with
+no rule at all, and every contested case examined:
+
+    Alopecia areata   21 vocabs  vs  1  and 1
+    Cancer            22 vocabs  vs  0  (NOTHING calls Neoplasms "cancer")
+    Obesity           33 vocabs  vs  1  (an OMIM genetic LOCUS)
+    Hip fracture      14 vocabs  vs  1  (NCI filing it under PELVIS)
+
+There is no close case in the corpus. The margins are 14x, 21x, 33x,
+and infinite -- so a 2x rule, a 5x rule, and strictly-greater all give
+identical answers, and any number picked would be unjustified by the
+data.
+
+So the rule is not a margin. It is the SAME EVIDENTIARY STANDARD
+already used for endpoints: two independent sources, or it does not
+count. If a future query produces contenders at 8 and 7 votes, that is
+a REAL ambiguity, it goes to a human, and THAT is when the boundary
+gets learned -- from a case that actually has one.
+
+## 9. Generative agency: none
+
+Key joins, API retrieval, typed-field gates, vote counts. Every step
+deterministic. Where the data is genuinely ambiguous, the system
+surfaces CONFLICT_DETECTED rather than guessing.
+
+This backend is MORE deterministic than the rare-disease pipeline,
+which needed bounded generative agency only because PubMed evidence
+synthesis requires judgment. Nothing here does. That is worth saying to
+FDA plainly: there is essentially no generative judgment in the
+reconciliation layer.
+
+**Terminology (deliberate):** these are TOOLS, not agents. An agent
+selects its own goals and actions. A tool with bounded generative
 agency executes a specified operation within a specified envelope, with
-outputs traceable to inputs. Nothing in this system is an agent. The
-inherited filenames say "agent" for historical reasons; the naming is
-debt, not a description.
+outputs traceable to inputs. Nothing here is an agent. Inherited
+filenames say "agent" for historical reasons; the naming is debt, not a
+description.
 
-## 5. Why calibration is required even in a deterministic system
+## 10. Calibration is required even in a deterministic system
 
 Deterministic is not the same as reliable. Deterministic means same
 input -> same output. Reliable means you actually GOT the input.
 
-The sources are not under our control and change on their own
-schedules:
-- An openFDA call fails -> a blank indication field. Is that a drug
-  with no indication, or a call that did not go through?
-  Indistinguishable unless instrumented. (Hence distinct NOT_FOUND /
-  ERROR / HTTP_nnn statuses.)
-- FDA changes the DDT Salesforce structure -> the scraper returns fewer
-  rows, silently. The reconciliation still "works," it just covers less.
-- A COA is renumbered or a page layout shifts -> the regex matches
-  nothing and reports a clean zero.
+The sources are not under our control. FDA changes the DDT Salesforce
+structure and the scraper returns fewer rows -- silently. An API call
+fails and a field is blank -- indistinguishable from a real absence
+unless instrumented. A COA is renumbered and a regex matches nothing,
+reporting a clean zero.
 
-Each of these produces a system that APPEARS to function: deterministic,
+Each produces a system that APPEARS to function: deterministic,
 reproducible, and wrong.
 
-**Two drift types, both real:**
-- *Deterministic drift* — sources update, outputs change, and that is
-  CORRECT. New COA qualified, new drug approved. The system SHOULD
-  change. But unmonitored, it is indistinguishable from silent
-  breakage.
-- *Generative drift* — plausible-but-unearned output no source
-  supports. Nearly absent here (see §4), because there is nearly no
-  generative agency.
+Two drift types: DETERMINISTIC drift (sources update, outputs change,
+and that is CORRECT -- but unmonitored it is indistinguishable from
+breakage) and GENERATIVE drift (nearly absent here, per section 9). The
+calibration burden is therefore overwhelmingly about source drift and
+infrastructure failure.
 
-So the calibration burden in this system is overwhelmingly about
-deterministic drift and infrastructure failure. That is a simpler and
-more defensible posture than the rare-disease pipeline, and worth
-saying to FDA plainly.
+## 11. Next
 
-## 6. Demonstration plan
+1. `hierarchy_matcher` -- MONDO parents/children. Two resolved
+   conditions -> EXACT / CHILD / PARENT / SIBLING / ANCESTOR.
+2. `coa_lookup`, `drug_lookup` -- joins on the resolved key.
+3. `orchestrator` -- assembles. Different pages suppress different
+   tools; the gates run on whatever is assembled.
+4. Demo: terminal, not a front end. A terminal answers "what is
+   actually underneath this?"; a UI invites the question. And a UI is
+   the one thing the communications office already believes is the
+   problem.
 
-Same coverage-set logic as the Cat 1-4 rare-disease demo diseases.
-Resolve real entities from different anchors, chosen to span the
-difficulty range:
-- **Condition-anchored** — for this disease, what COAs / drugs /
-  approvals exist (the empty-cell view)
-- **COA-anchored** — for this COA, what conditions and drugs use it,
-  what is its qualification status
-- **Drug-anchored** — for this approved drug, what COA measured its
-  endpoints
+## 12. PARKING LOT
 
-At least one case MUST surface a genuine CONFLICT_DETECTED /
-no-clean-match. Surfacing the conflict is correct behavior, not a
-weakness. The demo shows it; it does not hide it.
+**Guidance-authority document reader.** The guidance table in
+`condition_resolver` is currently a HARDCODED lookup with a citation
+attached -- honest, but it does not scale. The real version reads the
+COA's OWN documents (all 143 are on disk) and extracts the stated
+authority. FDA's SEALD review says, in plain text, "as described within
+the September 2012 FDA guidance for industry: [title]." That
+generalizes; the table does not. Requires the same discipline as
+claim_verification: extract what is stated, verify it appears verbatim,
+never infer.
 
-Specific entities for these cases: NOT YET SELECTED.
+**Routing flag.** When nothing resolves, the honest output is not just
+NOT_A_CONDITION -- it is "unable to resolve; the answer is likely in
+this COA's own documents; recommend human review." A routing decision,
+not a resolution.
 
-**Demo format: terminal, not a front end.** A terminal demo is more
-credible to a technical audience than a UI, because a UI invites "what
-is actually underneath this?" and a terminal answers it. A front end is
-also the one thing the communications office already believes is the
-problem.
+**COA submission review** (a SECOND, separate tool). Do not let it eat
+the prototype. Question library = FDA's own QP template (enumerated
+required sections). Corpus = 143 COA PDFs. Ground truth = the 5 "Not
+Accepted" letters paired with their LOIs. Honest limits: only 3 FQPs
+exist (demonstration set, NOT a calibration set), and unlike the
+reviewer tool there is NO registry-equivalent external anchor -- COA
+qualification is a judgment, and the reviewer's judgment IS the
+standard. So it gets the MECHANICAL PRE-READ, not a discrepancy engine.
+Say so.
 
-## 7. Scope boundary: what is NOT being built here
+## 13. Standing cautions
 
-- **No serving layer.** The rare-disease pipeline rendered static
-  documents; it never had to serve data to a front end. A serving layer
-  (reconciled model -> queryable API/store) is genuinely new, modest
-  (~1 week), and needed for ANY front end. It is NOT needed for a
-  backend prototype. Do not let it creep into scope.
-- **No front end.** Out of scope. If built later, the tax is the
-  learning curve, not the code.
-
-## 8. PARKING LOT: COA submission review (a SECOND, separate tool)
-
-Recorded here so it is not lost. **This is not the prototype. Do not
-let it eat the reconciliation work.**
-
-**The idea:** the COA qualification program's bottleneck is throughput —
-expert reviewer time — not policy. Published review clocks are LOI 3
-months, QP 6 months, FQP 10 months, and the clock does not even START
-until a submission is deemed "reviewable" (the completeness assessment,
-whose timeline is not specified in the guidance at all). 46.7% of
-submissions exceed the published targets. Nothing has been qualified
-since 2020.
-
-A completeness assessment is PURE MECHANICAL CHECKING. So is verifying
-that cited references exist and support what the submission claims.
-That is precisely what `citation_integrity` and `claim_verification`
-already do.
-
-**The three pieces are all on disk:**
-1. **Question library** — `fda_data/coa_templates/`. The Qualification
-   Plan template (fda_147023.pdf) is a fully enumerated numbered
-   required-section list: 1.1-1.5 (introduction, concept of interest,
-   context of use, COA details, expertise), 3.1-3.8 (literature review,
-   expert input, respondent input, concept elicitation, item
-   generation, cognitive interviews, item finalization, conceptual
-   framework), 4.1-4.2 (study design, inclusion/exclusion, assessment
-   timing, sample size and justification, baseline characteristics,
-   item-level statistics, dimensionality, item reduction). Each
-   numbered subsection is a completeness-check item; present/absent is
-   deterministic. The checklist is NOT invented — it is FDA's own
-   published template, the COA-domain equivalent of CONSORT.
-2. **Corpus** — `fda_data/coa_documents/`, 143 PDFs (26 LOIs, 45
-   determination letters, 3 FQPs, 2 Reviews, 1 SEALD Review).
-3. **Ground truth** — the 5 "FDA Response (NOT Accepted)" letters,
-   paired with their LOIs. FDA's own written reasoning about what was
-   inadequate. If the tool, reading an LOI, surfaces what FDA
-   independently flagged, that is a VALIDATED demonstration, not merely
-   a working one.
-
-**The document-as-canonical-object approach** (worked out in the
-FDA-review repo's PLANNING.md §11-12, a separate project): a document
-is not a blob to hand an LLM. It is a structured object with role-tagged
-regions, and each question has a KNOWN ADDRESS inside it. Methods
-answers "what was prespecified." Results answers "what was found."
-Discussion is the spin zone. The element taxonomy is finite (printed
-statistic / labeled count / axis-read / table-as-image), and the
-question set is finite and inherited (CONSORT, PRISMA, STROBE — or here,
-FDA's own template). The atomic operation is: read the role-appropriate
-section, holding one question, return a structured answer.
-
-**HONEST LIMITS — record these; they are what keep this from being
-oversold:**
-- **Only 3 FQPs exist.** This is a DEMONSTRATION set, not a CALIBRATION
-  set. You can prove the mechanism works on n=1-3 (structure is
-  learnable from few instances — that is why canonical objects work).
-  You CANNOT estimate a reliability RATE from n=3. Any "the tool
-  handles X% of the mechanical review" claim must be calibrated on the
-  drug review packages (abundant, public), not COA data.
-- **There is NO registry-equivalent external anchor.** The FDA-review
-  tool's power comes from ClinicalTrials.gov: timestamped, structured
-  prespecification you can check a document against. COA qualification
-  has no such thing. "Is this instrument fit for purpose?" is a
-  JUDGMENT, and the reviewer's judgment IS the standard. So the
-  two-tier split (externally-verifiable vs. internally-attestable)
-  collapses toward the judgment tier here.
-- Therefore: COA review gets the MECHANICAL PRE-READ, not a discrepancy
-  engine. Completeness, citation verification, claim-vs-source
-  checking, internal numeric consistency. NOT the scientific judgment.
-  That is a weaker claim than the review tool's — and it must be stated
-  as such.
-- **Only portions of submissions are public.** LOI sections 1-4; QP
-  sections 1-2. The full psychometric appendices are not posted.
-
-**Framing, if this is ever offered:** the tool does the clerical
-pre-read so scarce reviewer judgment goes to the judgment. Not "AI
-speeds up FDA review" — that reads to a reviewer, in a cut-budget
-environment, as the justification for the next round of cuts. The
-honest claim is a CAPACITY claim (hours come back), not a TIMELINE
-claim (review calendars include queue time, information requests,
-consultations — automating 200 clerical hours does not compress 10
-months proportionally).
-
-## 9. Immediate next steps
-
-1. Finish the openFDA run; record the coverage number in
-   SPIKE_FINDINGS §7.
-2. Reconfigure the four ported core files for the FDA sources
-   (docstrings first — they still describe disease resolution).
-3. Port `fda_match_util.py` from the rare-disease repo.
-4. Select the demonstration entities (§6).
-5. Decide the controlled vocabulary for indication-name normalization
-   (MONDO/MeSH). Nothing on disk yet serves this role — it is the one
-   genuinely missing artifact for a clean canonical object.
-
-## 10. Standing cautions
-
-- Ground truth is the repo and the real data. When output does not match
-  expectation, the assumption is the likely fault, not the machine.
-- Architecture is settled and transferred. If code looks inconsistent
-  with it, ask whether it is intentional before treating it as a defect.
-- Every "general engine" claim is a hypothesis until proven on a SECOND
-  domain. This IS the second domain. Building it converts belief to
-  demonstrated fact.
-- Do not let the parking-lot idea (§8) eat the prototype (§6). The more
-  interesting problem is the classic way the shippable one dies.
+- Ground truth is the repo and the real data. When output does not
+  match expectation, the assumption is the likely fault.
+- Every prediction made instead of looking has been wrong. Look.
+- Do not let the parking lot eat the prototype.
