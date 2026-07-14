@@ -177,6 +177,13 @@ STATUS_TRIAL_POPULATION = "RESOLVED_AS_TRIAL_POPULATION"
 STATUS_GUIDANCE_DEFINED = "RESOLVED_BY_GUIDANCE"
 STATUS_MULTINAME = "RESOLVED_FROM_MULTINAME"
 
+# The vocabularies whose PURPOSE is lay / patient language.
+# MedlinePlus is NLM's patient-facing health information. CHV is
+# the Consumer Health Vocabulary, built by studying how people
+# actually describe illness. They exist to answer exactly one
+# question: what does a person MEAN by this word.
+CONSUMER_VOCABULARIES = ("MEDLINEPLUS", "CHV")
+
 # A COA measures what a patient experiences. Symptoms, injuries, and
 # clinical findings are in scope. Genes, proteins, procedures, and
 # questionnaires are not.
@@ -626,6 +633,64 @@ def _fallback(name: str, query: str, context: dict,
                    near_misses=near_misses)
 
 
+def consumer_choice(contest: list[dict]) -> dict:
+    """
+    Two concepts both survived the gate. Which one does the term MEAN?
+
+    NOT a vote count. NOT a threshold. The same dispatch used
+    everywhere in this resolver: THE AUTHORITY THAT OWNS THE QUESTION
+    DECIDES. For a disease name a person would type, the owners are
+    MedlinePlus and CHV -- that is their entire purpose.
+
+    Measured on real queries a vote count could NOT decide:
+
+      breast cancer   C0006142  Malignant neoplasm of breast
+                                [CHV, MEDLINEPLUS]          <- chosen
+                      C0678222  Breast Carcinoma
+                                [CHV]
+          Both carry CHV. Only one carries MEDLINEPLUS.
+
+      lung cancer     C0242379  Malignant neoplasm of lung  <- chosen
+                      C0684249  Carcinoma of lung        (no consumer)
+
+      stroke          C0038454  Cerebrovascular accident    <- chosen
+                      C5977286  Stroke (heart beat)      (no consumer)
+          A cardiac rhythm term. A homonym, not a contender. No
+          consumer source points at it, because no person means that.
+
+      diabetes        C0011849  Diabetes Mellitus           <- chosen
+                      C0011847  Diabetes                 (no consumer)
+          C0011847 is the broader taxonomic parent, which INCLUDES
+          diabetes insipidus. No patient saying "diabetes" means
+          insipidus, and the consumer vocabularies encode that. That IS
+          their job.
+
+    A VOTE COUNT COULD NOT HAVE DONE THIS. Breast cancer is 14 vs 3.
+    Diabetes is 6 vs 5. Any margin tuned to separate the first would
+    silently pick a winner in the second; any margin loose enough to
+    defer on the second would fail on the first. The counts are not the
+    signal. The SOURCE is.
+
+    Returns the chosen candidate, or {} -- in which case it is a real
+    conflict and a human decides.
+    """
+    consumer = set(CONSUMER_VOCABULARIES)
+    with_consumer = [c for c in contest if set(c["support"]) & consumer]
+
+    if len(with_consumer) == 1:
+        return with_consumer[0]
+
+    if len(with_consumer) > 1:
+        # Both carry CHV. MedlinePlus is the narrower, patient-facing
+        # authority; if exactly one has it, that is the term's meaning.
+        with_mlp = [c for c in with_consumer
+                    if "MEDLINEPLUS" in c["support"]]
+        if len(with_mlp) == 1:
+            return with_mlp[0]
+
+    return {}
+
+
 def resolve(name: str, context: dict) -> dict:
     """
     Resolve one disease name. Returns a sealed condition object.
@@ -729,10 +794,27 @@ def resolve(name: str, context: dict) -> dict:
         return _fallback(name, query, context, near_misses)
 
     if len(contenders) > 1:
-        return _object(name, query, STATUS_CONFLICT,
-                       near_misses=near_misses,
-                       candidates=[c["cui"] for c in contenders],
-                       contest=contest)
+        # A vote count cannot adjudicate between two concepts that are
+        # both real. Ask the authority that owns the question.
+        chosen = consumer_choice(contenders)
+        if chosen:
+            consumer = set(CONSUMER_VOCABULARIES)
+            for c in contenders:
+                if c["cui"] != chosen["cui"]:
+                    hits = sorted(set(c["support"]) & consumer)
+                    near_misses.append({
+                        "source": "consumer_vocabulary",
+                        "reason": "NOT_THE_LAY_MEANING",
+                        "candidate": (f'{c["cui"]} {c["name"]} '
+                                      f'({c["n_support"]} vocab, '
+                                      f'consumer: {hits})'),
+                    })
+            contenders = [chosen]
+        else:
+            return _object(name, query, STATUS_CONFLICT,
+                           near_misses=near_misses,
+                           candidates=[c["cui"] for c in contenders],
+                           contest=contest)
 
     winner = contenders[0]
     mondo_id = context["mondo_terms"].get(query, "")
