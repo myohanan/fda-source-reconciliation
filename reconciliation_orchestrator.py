@@ -25,6 +25,27 @@ PIPELINE SEQUENCE
               A key join on the CUI. The EMPTY RESULT is a first-class
               answer, not a failure.
 
+  Step 2b hierarchy_matcher   (only if Step 2 found NOTHING)
+              The settled identity -> what is NEARBY, and how it
+              relates.
+
+              An empty COA result is honest and nearly useless on its
+              own. FDA's catalog holds 54 conditions and medicine holds
+              thousands, so almost every real query lands on an empty
+              cell. A developer typing "congestive heart failure" gets
+              NO COA -- while the KCCQ, qualified and used in 1,029
+              trials with 117 primary endpoints, sits one SIBLING away
+              under the same parent.
+
+              NAVIGATION, NOT RECOMMENDATION. Surfacing a neighbor is
+              not authorizing its use. Whether the KCCQ applies to an
+              acute decompensated population is a REGULATORY question --
+              its qualified context of use is "stage C & D heart
+              failure, NYHA Classes I-IV, HFpEF or HFrEF," and that is
+              FDA's determination, not this pipeline's.
+
+              The RELATION LABEL is what keeps it navigation.
+
   Step 3  drug_lookup
               The settled identity -> approved drugs, by TWO
               independent routes (RxNorm coded; openFDA label prose),
@@ -99,8 +120,14 @@ import coa_lookup as coa
 import condition_resolver as cr
 import drug_lookup as drugs
 import endpoint_search as es
+import hierarchy_matcher as hm
 
 PIPELINE_VERSION = "1.0"
+
+# The resolver context, loaded once and shared. The neighbor finder
+# needs it and is called from inside run(); passing it through every
+# frame would be noise.
+_RESOLVER_CONTEXT: dict = {}
 
 STEP_OK = "OK"
 STEP_DEGRADED = "DEGRADED"
@@ -118,6 +145,7 @@ def create_schema(query: str) -> dict:
         "coas": {},
         "drugs": {},
         "coa_usage": {},
+        "neighbors": [],
         "finding": {},
         "calibration": {
             "near_misses": [],
@@ -139,6 +167,9 @@ def run(query: str, context: dict, catalog: dict, documents: list,
     """
     One condition, end to end. Returns the sealed schema.
     """
+    global _RESOLVER_CONTEXT
+    _RESOLVER_CONTEXT = context
+
     schema = create_schema(query)
 
     # ---- STEP 1: IDENTITY. Sealed. Nothing downstream re-derives it.
@@ -196,6 +227,23 @@ def run(query: str, context: dict, catalog: dict, documents: list,
         _seal(schema, "2_coa_lookup", STEP_DEGRADED,
               f"{type(exc).__name__}")
 
+    # ---- STEP 2b: NOTHING FOR YOUR CONDITION -- IS ANYTHING NEARBY?
+    # Only when the catalog came back empty. An empty answer is honest;
+    # an empty answer with no neighbors offered is nearly useless.
+    if not schema["coas"].get("coas") and resolved.get("cui"):
+        try:
+            schema["neighbors"] = _find_neighbor_coas(
+                resolved, catalog, documents)
+            _seal(schema, "2b_hierarchy_matcher", STEP_OK,
+                  f'{len(schema["neighbors"])} neighbor(s) with a COA')
+        except Exception as exc:  # noqa: BLE001
+            schema["neighbors"] = []
+            _seal(schema, "2b_hierarchy_matcher", STEP_DEGRADED,
+                  f"{type(exc).__name__}")
+    else:
+        _seal(schema, "2b_hierarchy_matcher", STEP_SKIPPED,
+              "a COA exists for this condition")
+
     # ---- STEP 3: DRUGS. Two routes, labeled, never blended.
     try:
         drug_result = drugs.lookup(resolved, drug_index, approvals)
@@ -239,6 +287,69 @@ def run(query: str, context: dict, catalog: dict, documents: list,
     _seal(schema, "5_finding", STEP_OK)
 
     return schema
+
+
+def _find_neighbor_coas(resolved: dict, catalog: dict,
+                        documents: list) -> list[dict]:
+    """
+    Nothing for this condition. Does FDA have one for a NEIGHBOR?
+
+    Walks the immediate structural neighborhood -- parents, children,
+    siblings -- and checks each against the catalog.
+
+    It reports the RELATION, and nothing more. It does not say the
+    instrument applies. A COA qualified for chronic heart failure may or
+    may not be valid in an acute decompensated trial; that depends on
+    its context of use, and FDA is the one who decides.
+
+    Silence is not the same as absence. If the concept has no taxonomic
+    parent in ANY source -- as the seven trial-population conditions do
+    not -- the neighborhood is empty because there is nothing to walk,
+    and that is reported rather than returned as a blank.
+    """
+    hood = hm.neighbors(resolved["cui"])
+    if not hood["hierarchy_available"]:
+        return []
+
+    # catalog conditions, keyed by CUI
+    catalog_cuis = catalog["by_cui"]
+
+    found = []
+    seen = set()
+    for relation, entries in (
+            ("PARENT", hood["parents"]),
+            ("CHILD", hood["children"]),
+            ("SIBLING", hood["siblings"])):
+        for _code, name in entries:
+            key = cr.normalize(name)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            neighbor = cr.resolve(name, _RESOLVER_CONTEXT)
+            cui = neighbor.get("cui")
+            if not cui or cui not in catalog_cuis:
+                continue
+
+            coas = []
+            for entry in catalog_cuis[cui]:
+                coas.extend(entry["coas"])
+            if not coas:
+                continue
+
+            found.append({
+                "relation": relation,
+                "condition": name,
+                "cui": cui,
+                "coas": [{
+                    "instrument": c["instrument"],
+                    "qualified": c["qualified"],
+                    "stage": c["stage"],
+                    "context_of_use": c["context_of_use"],
+                } for c in coas],
+            })
+
+    return found
 
 
 def _instrument_names(raw: str) -> list[str]:
@@ -307,6 +418,18 @@ def _assemble(schema: dict) -> dict:
     else:
         lines.append('DRUGS: none found by either route.')
 
+    neighbors = schema.get("neighbors", [])
+    if not has_coa and neighbors:
+        for n in neighbors[:3]:
+            marks = [c for c in n["coas"] if c["qualified"]]
+            mark = " (QUALIFIED)" if marks else ""
+            lines.append(
+                f'NEARBY: {n["condition"]} is a {n["relation"]} of your '
+                f'condition, and FDA has {len(n["coas"])} COA(s) for '
+                f'it{mark}. These are DIFFERENT concepts. Whether the '
+                f'instrument applies to your population is a regulatory '
+                f'judgment -- read its context of use.')
+
     gap = ""
     if has_drugs and not has_coa:
         gap = ('FDA has approved therapies for this disease and has '
@@ -372,6 +495,19 @@ def main() -> None:
                     print(f'             USED IN {use.get("trials", "?")} '
                           f'trials, {use.get("as_primary", "?")} as '
                           f'primary endpoint')
+
+        for n in schema.get("neighbors", [])[:3]:
+            print()
+            print(f'  NEARBY   : {n["condition"]}  '
+                  f'[{n["relation"]} of your condition]')
+            for c in n["coas"]:
+                mark = "  [QUALIFIED]" if c["qualified"] else ""
+                print(f'             {c["instrument"][:52]}{mark}')
+                print(f'             context: '
+                      f'{c["context_of_use"][:44]}')
+            print('             NOTE: a different concept. Whether this')
+            print('             instrument applies to your population is')
+            print('             a REGULATORY judgment, not this tool\'s.')
 
         drug_list = schema["drugs"].get("drugs", [])
         for drug in [d for d in drug_list if d["both_routes"]][:5]:
