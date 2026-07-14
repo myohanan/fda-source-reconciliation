@@ -1,0 +1,452 @@
+"""
+hierarchy_matcher.py
+--------------------
+FDA Source Reconciliation
+Independent Women's Center for Better Health
+
+Given two RESOLVED conditions, what is their relation?
+
+One job. It does not resolve identity (condition_resolver does that),
+does not look at the COA catalog (coa_lookup does that), and does not
+decide whether a COA is APPLICABLE to a population -- that is a
+regulatory and clinical judgment, and no tool here makes it.
+
+WHY THIS EXISTS
+
+coa_lookup's answer for congestive heart failure is technically true and
+practically useless. It says NO COA -- and the KCCQ, qualified and used
+in 1,029 trials with 117 primary endpoints, sits one SIBLING away under
+the same parent.
+
+That is not a corner case. It is the TYPICAL case: FDA's catalog holds
+54 conditions and medicine holds thousands, so almost every real query
+lands on an empty cell. If the only answer is "nothing," the tool is
+honest and nearly useless.
+
+The hierarchy is what makes "nothing" INFORMATIVE: nothing for your
+condition, but here is what is nearby and here is the RELATIONSHIP.
+
+NAVIGATION, NOT RECOMMENDATION
+
+Surfacing a neighbor is not authorizing its use. Whether the KCCQ
+applies to an acute decompensated population is a REGULATORY question --
+its qualified context of use is "stage C & D heart failure, NYHA Classes
+I-IV, HFpEF or HFrEF," and that is FDA's determination to make, not this
+tool's.
+
+The RELATION LABEL is what keeps it navigation. "SIBLING" is
+information. "You can use this" would be advice, and this tool has no
+standing to give it.
+
+SIX SOURCES, BECAUSE ONE IS NOT ENOUGH -- AND THIS WAS MEASURED
+
+A first version of this tool was built on SNOMED alone -- not because
+SNOMED was the right authority, but because it was already on hand. The
+coverage gaps were then defended rather than measured. That was wrong,
+and it is the same error the resolver made with MONDO before the corpus
+corrected it.
+
+So it was measured. Across all 54 FDA COA conditions:
+
+    SNOMED    47/54  (87%)
+    MeSH      43/54  (79%)
+    NCIt      43/54  (79%)
+    MONDO     38/54  (70%)
+    ICD-10CM  36/54  (66%)
+    MedDRA    31/54  (57%)
+
+No source covers everything. 19 conditions have a parent in ALL SIX; 18
+more in five. So the hierarchy is asked of every source, and agreement
+across them is the confidence -- exactly as it is for identity.
+
+NO_HIERARCHY IS A REAL STATE, NOT A SILENT ZERO
+
+Seven of the 54 conditions have NO parent in ANY of the six sources:
+
+    Acute Bacterial Skin and Skin Structure Infection
+    Community-Acquired Bacterial Pneumonia
+    Hospital-acquired Bacterial Pneumonia
+    Non-Cystic Fibrosis Bronchiectasis
+    Dystrophinopathy
+    Acute Bacterial Exacerbation of Chronic Bronchitis in COPD
+    Recovery from surgery and anesthesia
+
+That is not a coverage gap. IT IS A CATEGORY FACT. These are TRIAL
+ENROLLMENT DEFINITIONS, not disease entities -- they resolved through
+ClinicalTrials.gov, not through any vocabulary. A trial population has
+no taxonomic parent because it is not the kind of thing that has one.
+
+So the tool REPORTS that, plainly. "No neighbors found" and "this has no
+taxonomic parent anywhere, because it is a trial population" are
+different facts, and a user cannot tell them apart from a blank. That
+confusion -- failed check versus real absence -- is the failure this
+whole architecture exists to prevent, and a silent hierarchy would have
+introduced it through the tool meant to add value.
+
+SHARED ANCESTRY IS NOT A RELATION
+
+Every concept shares an ancestor: the root. Congestive and chronic heart
+failure share TWENTY SNOMED ancestors, including "Disorder of thorax"
+and "Functional finding." Reporting that as a relationship would be
+noise dressed as insight.
+
+Only STRUCTURAL, IMMEDIATE relations are reported -- parent, child,
+sibling -- or true ancestry within a bounded depth. A relation without
+distance is a statement that two things are both diseases.
+
+THE CASE THIS WAS BUILT FOR
+
+    congestive heart failure  C0018802
+        SNOMED 42343007, parents: Heart failure,
+                                  Disorder of cardiac ventricle
+    chronic heart failure     C0264716
+        SNOMED 48447003, parents: Heart failure,
+                                  Chronic heart disease
+
+SIBLINGS. Both children of Heart failure. Neither subsumes the other --
+verified in both directions.
+
+A synonym list would collapse them, hand the developer FDA's COA, and
+never say the concepts differ. This tool surfaces the neighbor and NAMES
+THE RELATIONSHIP.
+"""
+
+import json
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+import condition_resolver as cr
+
+UMLS = "https://uts-ws.nlm.nih.gov/rest"
+HEADERS = {"User-Agent": "fda-recon/1.0", "Accept": "application/json"}
+PAUSE = 0.12
+TIMEOUT = 40
+
+# Every source with a real is-a hierarchy, and its UMLS abbreviation.
+# Coverage measured across FDA's 54 COA conditions -- see the docstring.
+SOURCES = {
+    "SNOMED": "SNOMEDCT_US",
+    "MESH": "MSH",
+    "NCIT": "NCI",
+    "ICD10CM": "ICD10CM",
+    "MEDDRA": "MDR",
+}
+
+REL_EXACT = "EXACT"
+REL_PARENT = "PARENT"
+REL_CHILD = "CHILD"
+REL_SIBLING = "SIBLING"
+REL_ANCESTOR = "ANCESTOR"
+REL_DESCENDANT = "DESCENDANT"
+REL_UNRELATED = "UNRELATED"
+REL_NO_HIERARCHY = "NO_HIERARCHY"
+
+# A structural relation from ANY source outranks UNRELATED from the
+# rest: silence is not disagreement. A source that does not carry a
+# concept has not voted against a relation -- it has not voted.
+_RANK = {
+    REL_EXACT: 0,
+    REL_PARENT: 1,
+    REL_CHILD: 1,
+    REL_SIBLING: 2,
+    REL_ANCESTOR: 3,
+    REL_DESCENDANT: 3,
+    REL_UNRELATED: 9,
+}
+
+_code_cache: dict[tuple[str, str], str] = {}
+_rel_cache: dict[tuple[str, str, str], list[tuple[str, str]]] = {}
+
+
+def _get(path: str, **params) -> dict:
+    params["apiKey"] = cr.UMLS_API_KEY
+    url = f"{UMLS}{path}?{urllib.parse.urlencode(params)}"
+    request = urllib.request.Request(url, headers=HEADERS)
+    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        return json.load(response)
+
+
+def code_in(cui: str, sab: str) -> str:
+    """The source's own code for this concept, or empty."""
+    if not cui or not cr.UMLS_API_KEY:
+        return ""
+    cached = _code_cache.get((cui, sab))
+    if cached is not None:
+        return cached
+
+    code = ""
+    try:
+        atoms = _get(f"/content/current/CUI/{cui}/atoms",
+                     sabs=sab, pageSize=5)["result"]
+        for atom in atoms:
+            raw = atom.get("code", "")
+            if raw:
+                code = raw.rstrip("/").split("/")[-1]
+                break
+    except Exception:  # noqa: BLE001
+        code = ""
+
+    _code_cache[(cui, sab)] = code
+    time.sleep(PAUSE)
+    return code
+
+
+def _relatives(sab: str, code: str,
+               kind: str) -> list[tuple[str, str]]:
+    """parents / children / ancestors of a code, in one source."""
+    if not code:
+        return []
+    cached = _rel_cache.get((sab, code, kind))
+    if cached is not None:
+        return cached
+
+    result: list[tuple[str, str]] = []
+    try:
+        payload = _get(f"/content/current/source/{sab}/{code}/{kind}",
+                       pageSize=100)["result"]
+        result = [(x["ui"], x["name"]) for x in payload]
+    except Exception:  # noqa: BLE001
+        result = []
+
+    _rel_cache[(sab, code, kind)] = result
+    time.sleep(PAUSE)
+    return result
+
+
+def _relation_in(sab: str, code_a: str, code_b: str) -> tuple[str, list]:
+    """The relation of B to A, according to ONE source."""
+    if not code_a or not code_b:
+        return REL_NO_HIERARCHY, []
+
+    parents_a = _relatives(sab, code_a, "parents")
+    parents_b = _relatives(sab, code_b, "parents")
+    ids_a = {u for u, _ in parents_a}
+    ids_b = {u for u, _ in parents_b}
+
+    if code_b in ids_a:
+        return REL_PARENT, []
+    if code_a in ids_b:
+        return REL_CHILD, []
+
+    shared = ids_a & ids_b
+    if shared:
+        names = dict(parents_a + parents_b)
+        return REL_SIBLING, [names[s] for s in sorted(shared)]
+
+    ancestors_a = {u for u, _ in _relatives(sab, code_a, "ancestors")}
+    if code_b in ancestors_a:
+        return REL_ANCESTOR, []
+
+    ancestors_b = {u for u, _ in _relatives(sab, code_b, "ancestors")}
+    if code_a in ancestors_b:
+        return REL_DESCENDANT, []
+
+    # Deliberately NOT reported: a shared REMOTE ancestor. Every concept
+    # shares the root. Congestive and chronic heart failure share twenty
+    # SNOMED ancestors, including "Disorder of thorax." That is not a
+    # relationship; it is a statement that both are disorders of the
+    # body.
+    return REL_UNRELATED, []
+
+
+def relate(cui_a: str, cui_b: str) -> dict:
+    """
+    The relation of B to A, asked of every source that has a hierarchy.
+
+    Convergence across independent taxonomies is the confidence, exactly
+    as it is for identity. A source that does not carry the concept has
+    NOT voted against a relation -- it has not voted, and its silence is
+    recorded as NO_HIERARCHY for that source rather than counted as
+    disagreement.
+    """
+    if cui_a and cui_a == cui_b:
+        return _result(cui_a, cui_b, REL_EXACT, {}, [])
+
+    by_source: dict[str, dict] = {}
+    votes: dict[str, list[str]] = {}
+
+    for name, sab in SOURCES.items():
+        code_a = code_in(cui_a, sab)
+        code_b = code_in(cui_b, sab)
+
+        if not code_a or not code_b:
+            by_source[name] = {"relation": REL_NO_HIERARCHY,
+                               "code_a": code_a, "code_b": code_b,
+                               "via": []}
+            continue
+
+        relation, shared = _relation_in(sab, code_a, code_b)
+        # `via` is recorded PER SOURCE, not first-wins.
+        #
+        # A first version took the first shared parent any source
+        # reported, regardless of whether that source won the vote. On
+        # NSCLC vs lung cancer it labelled the result "via Lower
+        # respiratory tract neoplasms" -- which was MedDRA's SIBLING
+        # reasoning, and MedDRA LOST to three sources saying DESCENDANT.
+        #
+        # A path that belongs to a rejected relation is not the path.
+        by_source[name] = {"relation": relation, "code_a": code_a,
+                           "code_b": code_b, "via": shared}
+        votes.setdefault(relation, []).append(name)
+
+    if not votes:
+        return _result(
+            cui_a, cui_b, REL_NO_HIERARCHY, by_source, [],
+            note=("Neither concept has a taxonomic code in any of the "
+                  "six hierarchies. If this is a TRIAL POPULATION -- an "
+                  "enrollment definition rather than a disease entity -- "
+                  "it has no parent because it is not the kind of thing "
+                  "that has one. That is a CATEGORY FACT, not a coverage "
+                  "gap."))
+
+    # CONVERGENCE FIRST. Relation rank is only a tiebreak.
+    #
+    # A first version ranked the relation TYPE above the vote COUNT, and
+    # it got NSCLC vs lung cancer wrong: SNOMED, MeSH, and NCIt all said
+    # DESCENDANT, MedDRA alone said SIBLING, and the rule picked
+    # SIBLING -- because SIBLING outranked DESCENDANT in the table.
+    #
+    # That inverts the principle used everywhere else in this project:
+    # agreement across independent authorities IS the confidence. Three
+    # taxonomies agreeing beats one, regardless of which relation is
+    # "closer" in some ordering I invented.
+    #
+    # MedDRA calls them siblings because its five-level regulatory
+    # hierarchy is coarser than a clinical taxonomy. That is a carving
+    # difference, and it is recorded as dissent -- not allowed to
+    # overrule three sources.
+    #
+    # UNRELATED still loses to any structural relation: a source that
+    # finds no path has not asserted that none exists.
+    def rank(relation: str) -> tuple:
+        structural = 1 if relation == REL_UNRELATED else 0
+        return (structural, -len(votes[relation]),
+                _RANK.get(relation, 9))
+
+    winner = min(votes, key=rank)
+
+    # the shared parent, from the sources that AGREED on the winner
+    via: list[str] = []
+    for name in votes[winner]:
+        shared = by_source[name].get("via") or []
+        for parent in shared:
+            if parent not in via:
+                via.append(parent)
+
+    return _result(cui_a, cui_b, winner, by_source,
+                   sorted(votes[winner]), via=via,
+                   dissent={r: v for r, v in votes.items()
+                            if r != winner})
+
+
+def _result(cui_a, cui_b, relation, by_source, agreeing,
+            **kwargs) -> dict:
+    return {
+        "cui_a": cui_a,
+        "cui_b": cui_b,
+        "relation": relation,
+        "agreeing_sources": agreeing,
+        "n_agreeing": len(agreeing),
+        "by_source": by_source,
+        "via": kwargs.get("via", []),
+        "dissent": kwargs.get("dissent", {}),
+        "note": kwargs.get("note", ""),
+    }
+
+
+def neighbors(cui: str, sab: str = "SNOMEDCT_US") -> dict:
+    """
+    The immediate structural neighborhood of a concept, from one source.
+
+    This is what a developer needs when nothing exists for their exact
+    condition: here is what is nearby, and here is how it relates.
+
+    It is NAVIGATION. This tool has no opinion about whether any of it
+    applies to their trial -- that is a regulatory judgment, and the
+    instrument's qualified context of use is where it is answered.
+    """
+    code = code_in(cui, sab)
+    if not code:
+        return {"cui": cui, "source": sab, "code": "",
+                "hierarchy_available": False,
+                "parents": [], "children": [], "siblings": []}
+
+    parents = _relatives(sab, code, "parents")
+    children = _relatives(sab, code, "children")
+
+    siblings: list[tuple[str, str]] = []
+    seen = {code}
+    for parent_id, _name in parents:
+        for sib_id, sib_name in _relatives(sab, parent_id, "children"):
+            if sib_id not in seen:
+                seen.add(sib_id)
+                siblings.append((sib_id, sib_name))
+
+    return {
+        "cui": cui,
+        "source": sab,
+        "code": code,
+        "hierarchy_available": True,
+        "parents": parents,
+        "children": children,
+        "siblings": sorted(siblings, key=lambda s: s[1]),
+    }
+
+
+def main() -> None:
+    if not cr.UMLS_API_KEY:
+        print("ERROR: no UMLS_API_KEY in .env")
+        return
+
+    if len(sys.argv) == 3:
+        result = relate(sys.argv[1], sys.argv[2])
+        print()
+        print(f'  {result["cui_a"]}  ->  {result["cui_b"]}')
+        print(f'  RELATION : {result["relation"]}')
+        print(f'  agreed by: {result["n_agreeing"]} sources '
+              f'{result["agreeing_sources"]}')
+        if result["via"]:
+            print(f'  via      : {result["via"]}')
+        if result["dissent"]:
+            print(f'  dissent  : {result["dissent"]}')
+        if result["note"]:
+            print(f'  NOTE     : {result["note"]}')
+        print()
+        print('  per source:')
+        for name, detail in result["by_source"].items():
+            print(f'      {name:<8} {detail["relation"]:<14} '
+                  f'{detail["code_a"] or "-":<12} '
+                  f'{detail["code_b"] or "-"}')
+        print()
+        return
+
+    if len(sys.argv) == 2:
+        hood = neighbors(sys.argv[1])
+        print()
+        print(f'  CUI {hood["cui"]}  {hood["source"]} {hood["code"]}')
+        if not hood["hierarchy_available"]:
+            print('  NO_HIERARCHY -- this concept has no taxonomic code')
+            print('  in this source. If it is a trial population, it')
+            print('  has no parent ANYWHERE, because it is not the kind')
+            print('  of thing that has one.')
+            print()
+            return
+        for label, key in (("parents", "parents"),
+                           ("children", "children"),
+                           ("siblings", "siblings")):
+            entries = hood[key]
+            print(f'  {label} ({len(entries)}):')
+            for _code, name in entries[:12]:
+                print(f'      {name}')
+        print()
+        return
+
+    print("usage:")
+    print('  python3 hierarchy_matcher.py CUI          # neighborhood')
+    print('  python3 hierarchy_matcher.py CUI_A CUI_B  # relation')
+
+
+if __name__ == "__main__":
+    main()
