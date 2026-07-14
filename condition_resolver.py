@@ -755,7 +755,8 @@ def resolve(name: str, context: dict) -> dict:
     # rule at all, and every contested case was examined. The result:
     #
     #   Alopecia areata   21 vocabs  vs  1  (Alopecia) and 1 (Patchy alopecia)
-    #   Cancer            22 vocabs  vs  0  (Neoplasms -- NOTHING calls it that)
+    #   Cancer            22 vocabs  vs  0
+    #                     (Neoplasms -- NOTHING calls it that)
     #   Obesity           33 vocabs  vs  1  (an OMIM genetic LOCUS)
     #   Hip fracture      14 vocabs  vs  1  (NCI filing it under PELVIS)
     #
