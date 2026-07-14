@@ -173,6 +173,7 @@ STATUS_RESOLVED = "RESOLVED"
 STATUS_CONFLICT = "CONFLICT_DETECTED"
 STATUS_NOT_CONDITION = "NOT_A_CONDITION"
 STATUS_UNRESOLVED = "UNRESOLVED"
+STATUS_LOOKUP_FAILED = "LOOKUP_FAILED"
 STATUS_TRIAL_POPULATION = "RESOLVED_AS_TRIAL_POPULATION"
 STATUS_GUIDANCE_DEFINED = "RESOLVED_BY_GUIDANCE"
 STATUS_MULTINAME = "RESOLVED_FROM_MULTINAME"
@@ -251,16 +252,48 @@ def normalize(name: str) -> str:
     return _SPACE_RE.sub(" ", text).strip()
 
 
+UMLS_MAX_RETRIES = 3
+
+
 def _umls_get(path: str, **params) -> dict:
-    """One authenticated UMLS call."""
+    """
+    One authenticated UMLS call, with retry.
+
+    Retries exist because the alternative is worse than slowness. A
+    swallowed network failure in this function used to propagate all the
+    way to a FINDING: the semantic-type lookup would return nothing, the
+    gate would read "no type" as "not a condition," and the resolver
+    would report that congestive heart failure IS NOT A DISEASE.
+
+    A transient API failure must never become a statement about a
+    disease. Retry first; if it still fails, raise -- and let the caller
+    report LOOKUP_FAILED, which is a different fact.
+    """
     params["apiKey"] = UMLS_API_KEY
     request = urllib.request.Request(
         f"{UMLS_BASE}{path}?{urllib.parse.urlencode(params)}",
         headers={"User-Agent": "fda-recon/1.0",
                  "Accept": "application/json"})
-    with urllib.request.urlopen(
-            request, timeout=UMLS_TIMEOUT_SECONDS) as response:
-        return json.load(response)
+
+    last = None
+    for attempt in range(UMLS_MAX_RETRIES):
+        try:
+            with urllib.request.urlopen(
+                    request, timeout=UMLS_TIMEOUT_SECONDS) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            # A 404 is an ANSWER: the concept does not exist. Do not
+            # retry it, and do not treat it as a failure.
+            if exc.code == 404:
+                raise
+            last = exc
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+        if attempt < UMLS_MAX_RETRIES - 1:
+            time.sleep(2 ** attempt)
+
+    raise RuntimeError(f"UMLS unreachable after {UMLS_MAX_RETRIES} "
+                       f"attempts: {type(last).__name__}")
 
 
 def metathesaurus_search(query: str) -> tuple[list[dict], list[dict]]:
@@ -279,12 +312,14 @@ def metathesaurus_search(query: str) -> tuple[list[dict], list[dict]]:
             "/search/current", string=query, searchType="exact",
             returnIdType="concept", pageSize=UMLS_PAGE_SIZE)
     except urllib.error.HTTPError as exc:
-        return [], [{"source": "umls", "reason": f"HTTP_{exc.code}",
-                     "candidate": ""}]
-    except Exception as exc:  # noqa: BLE001
-        return [], [{"source": "umls",
-                     "reason": f"ERROR:{type(exc).__name__}",
-                     "candidate": ""}]
+        if exc.code == 404:
+            # 404 is an ANSWER: nothing matched. Not a failure.
+            return [], []
+        raise
+    except Exception:  # noqa: BLE001
+        # Let it propagate. resolve() converts it to LOOKUP_FAILED --
+        # which is "we could not check," NOT "this is not a condition."
+        raise
 
     # UMLS's searchType=exact has ALREADY done the exact matching --
     # against every ATOM of every concept, across ~200 vocabularies.
@@ -313,7 +348,7 @@ def concept_detail(cui: str) -> dict:
     if cached is not None:
         return cached
 
-    detail = {"types": [], "atoms": 0, "name": ""}
+    detail = {"types": [], "atoms": 0, "name": "", "failed": False}
     try:
         result = _umls_get(f"/content/current/CUI/{cui}")["result"]
         detail["types"] = [
@@ -321,14 +356,19 @@ def concept_detail(cui: str) -> dict:
         detail["atoms"] = result.get("atomCount", 0)
         detail["name"] = result.get("name", "")
     except Exception:  # noqa: BLE001
-        pass
+        # THE CALL FAILED. That is NOT the same as "this concept has no
+        # semantic type." An earlier version returned an empty type list
+        # here, the gate read it as a rejection, and the resolver
+        # reported NOT_A_CONDITION -- a finding about the DISEASE,
+        # produced by a network hiccup.
+        detail["failed"] = True
 
     _concept_cache[cui] = detail
     time.sleep(UMLS_PAUSE_SECONDS)
     return detail
 
 
-def supporting_vocabularies(cui: str, query: str) -> list[str]:
+def supporting_vocabularies(cui: str, query: str) -> list[str] | None:
     """
     Which vocabularies carry the QUERY STRING ITSELF as an atom of this
     concept?
@@ -370,6 +410,7 @@ def supporting_vocabularies(cui: str, query: str) -> list[str]:
         return cached
 
     sources: set[str] = set()
+    failed = False
     try:
         atoms = _umls_get(
             f"/content/current/CUI/{cui}/atoms",
@@ -380,7 +421,14 @@ def supporting_vocabularies(cui: str, query: str) -> list[str]:
                 if source:
                     sources.add(source)
     except Exception:  # noqa: BLE001
-        pass
+        # Same failure class: an empty support list here would be read
+        # as "only one vocabulary names this," the two-source minimum
+        # would reject it, and the resolver would report a finding.
+        failed = True
+
+    if failed:
+        _support_cache[(cui, query)] = None
+        return None
 
     result = sorted(sources)
     _support_cache[(cui, query)] = result
@@ -703,7 +751,24 @@ def resolve(name: str, context: dict) -> dict:
             "reason": "EMPTY_AFTER_NORMALIZATION",
             "candidate": name}])
 
-    candidates, near_misses = metathesaurus_search(query)
+    # A LOOKUP FAILURE IS NOT A FINDING.
+    #
+    # Every UMLS call below can fail. An earlier version swallowed those
+    # failures and returned empty results -- which the gates read as
+    # rejections, and the resolver reported NOT_A_CONDITION. A network
+    # hiccup became a statement that congestive heart failure is not a
+    # disease.
+    #
+    # "We checked and this is not a condition" and "we could not check"
+    # are completely different facts. The system must never confuse
+    # them, and it must never report the first when it means the second.
+    try:
+        candidates, near_misses = metathesaurus_search(query)
+    except Exception as exc:  # noqa: BLE001
+        return _object(name, query, STATUS_LOOKUP_FAILED, near_misses=[{
+            "source": "umls",
+            "reason": "SEARCH_FAILED",
+            "candidate": f"{type(exc).__name__}"}])
 
     if not candidates:
         return _fallback(name, query, context, near_misses)
@@ -712,6 +777,12 @@ def resolve(name: str, context: dict) -> dict:
     surviving = []
     for candidate in candidates:
         detail = concept_detail(candidate["cui"])
+        if detail["failed"]:
+            return _object(name, query, STATUS_LOOKUP_FAILED,
+                           near_misses=near_misses + [{
+                               "source": "umls",
+                               "reason": "SEMANTIC_TYPE_LOOKUP_FAILED",
+                               "candidate": candidate["cui"]}])
         types = detail["types"]
         if not types:
             near_misses.append({
@@ -734,9 +805,15 @@ def resolve(name: str, context: dict) -> dict:
 
     # SCORE every survivor: how many vocabularies call it by this name?
     for candidate in surviving:
-        candidate["support"] = supporting_vocabularies(
-            candidate["cui"], query)
-        candidate["n_support"] = len(candidate["support"])
+        support = supporting_vocabularies(candidate["cui"], query)
+        if support is None:
+            return _object(name, query, STATUS_LOOKUP_FAILED,
+                           near_misses=near_misses + [{
+                               "source": "umls",
+                               "reason": "SUPPORT_LOOKUP_FAILED",
+                               "candidate": candidate["cui"]}])
+        candidate["support"] = support
+        candidate["n_support"] = len(support)
 
     surviving.sort(key=lambda c: -c["n_support"])
     contest = [

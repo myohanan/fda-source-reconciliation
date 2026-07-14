@@ -200,6 +200,38 @@ def run(query: str, context: dict, catalog: dict, documents: list,
     schema["calibration"]["near_misses"].extend(resolved["near_misses"])
     _seal(schema, "1_condition_resolver", STEP_OK, resolved["status"])
 
+    # A LOOKUP FAILURE IS NOT A FINDING.
+    #
+    # If the vocabulary service could not be reached, the pipeline knows
+    # NOTHING about this disease -- and it must say so in those terms.
+    # It must not say "we could not determine what disease this is,"
+    # which implies we looked. We did not look. The instrument was
+    # broken.
+    #
+    # This distinction is not academic. An earlier version swallowed a
+    # transient UMLS failure, returned empty semantic types, and the gate
+    # read that as a rejection: the resolver reported that CONGESTIVE
+    # HEART FAILURE IS NOT A CONDITION. A network hiccup produced a
+    # statement about a disease, and nothing in the output looked broken.
+    if resolved["status"] == cr.STATUS_LOOKUP_FAILED:
+        schema["finding"] = {
+            "statement": (
+                f'PIPELINE FAILURE. The vocabulary service could not be '
+                f'reached, so "{query}" was never looked up. This is a '
+                f'statement about the SYSTEM, not about the disease and '
+                f'not about FDA. Nothing below should be read as a '
+                f'finding. Retry.'),
+            "resolved": False,
+            "system_failure": True,
+        }
+        _seal(schema, "1_condition_resolver", STEP_DEGRADED,
+              "UMLS unreachable")
+        _seal(schema, "2_coa_lookup", STEP_SKIPPED, "lookup failed")
+        _seal(schema, "2b_hierarchy_matcher", STEP_SKIPPED,
+              "lookup failed")
+        _seal(schema, "3_drug_lookup", STEP_SKIPPED, "lookup failed")
+        return schema
+
     identified = bool(resolved["cui"]) or (
         resolved["status"] in coa.RESOLVED_WITHOUT_CUI)
 
@@ -207,13 +239,15 @@ def run(query: str, context: dict, catalog: dict, documents: list,
         schema["finding"] = {
             "statement": (
                 f'"{query}" did not resolve to a condition '
-                f'({resolved["status"]}). No lookup is possible. This '
+                f'({resolved["status"]}). We checked ~200 vocabularies, '
+                f'the trial registry, and the cited guidance table. This '
                 f'is NOT a statement that FDA has nothing -- it is a '
-                f'statement that we could not determine what disease '
-                f'this is.'),
+                f'statement that this string does not name a condition '
+                f'any authority recognizes.'),
             "resolved": False,
         }
         _seal(schema, "2_coa_lookup", STEP_SKIPPED, "unresolved")
+        _seal(schema, "2b_hierarchy_matcher", STEP_SKIPPED, "unresolved")
         _seal(schema, "3_drug_lookup", STEP_SKIPPED, "unresolved")
         return schema
 
@@ -473,6 +507,9 @@ def main() -> None:
 
         print()
         print("=" * 68)
+        if schema["finding"].get("system_failure"):
+            print("  *** PIPELINE FAILURE -- NOT A FINDING ***")
+            print()
         print(schema["finding"].get("statement", ""))
         if schema["finding"].get("gap"):
             print()
