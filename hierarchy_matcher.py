@@ -131,6 +131,76 @@ _CACHE_PATH = os.path.join(_CACHE_DIR,
                            "hierarchy_relation_cache.json")
 _KEY_SEP = "|"
 
+# SNOMED's is-a hierarchy, built once from the RF2 release by
+# build_snomed_index.py and read from disk instead of fetched live.
+# SNOMED is the source hierarchy_matcher walks for neighbors; serving it
+# locally removes the per-neighbor UMLS call that made a no-COA query
+# spend ~110 seconds over the network. The other five sources still go
+# live -- only SNOMED is on disk. If the index file is absent, the
+# SNOMED path falls through to the live API exactly as before.
+_SNOMED_SAB = "SNOMEDCT_US"
+_SNOMED_INDEX_PATH = os.path.join(_CACHE_DIR, "snomed_index.json")
+_snomed_index: dict = {}
+
+
+def _load_snomed_index() -> None:
+    """
+    Seed the SNOMED is-a index from disk, if present. A missing file is
+    not an error -- the SNOMED path degrades to the live API, same as
+    before this index existed.
+    """
+    if not os.path.exists(_SNOMED_INDEX_PATH):
+        return
+    try:
+        with open(_SNOMED_INDEX_PATH, encoding="utf-8") as handle:
+            _snomed_index.update(json.load(handle))
+    except Exception:  # noqa: BLE001
+        _snomed_index.clear()
+
+
+_load_snomed_index()
+
+
+def _snomed_ancestors(code: str) -> list[tuple[str, str]]:
+    """
+    All ancestors of a SNOMED code, walked transitively up the is-a
+    links to the root. The index stores only IMMEDIATE parents; the live
+    API returned the full ancestor chain, so this reproduces that by
+    walking parents of parents. Cycles cannot occur in a well-formed
+    is-a hierarchy, but a seen-set guards against a malformed one.
+    """
+    out: list[tuple[str, str]] = []
+    seen = {code}
+    frontier = [code]
+    while frontier:
+        current = frontier.pop()
+        node = _snomed_index.get(current)
+        if not node:
+            continue
+        for parent in node["parents"]:
+            if parent in seen:
+                continue
+            seen.add(parent)
+            pname = _snomed_index.get(parent, {}).get("name", "")
+            out.append((parent, pname))
+            frontier.append(parent)
+    return out
+
+
+def _snomed_relatives(code: str, kind: str) -> list[tuple[str, str]]:
+    """
+    parents / children / ancestors of a SNOMED code, from the local
+    index -- the same shape the live _relatives returns: (id, name)
+    tuples. No network, no pause.
+    """
+    if kind == "ancestors":
+        return _snomed_ancestors(code)
+    node = _snomed_index.get(code)
+    if not node:
+        return []
+    ids = node.get(kind, [])
+    return [(i, _snomed_index.get(i, {}).get("name", "")) for i in ids]
+
 # Every source with a real is-a hierarchy, and its UMLS abbreviation.
 # Coverage measured across FDA's 54 COA conditions -- see the docstring.
 SOURCES = {
@@ -264,6 +334,13 @@ def _relatives(sab: str, code: str,
     """parents / children / ancestors of a code, in one source."""
     if not code:
         return []
+
+    # SNOMED is served from the local is-a index when it is loaded --
+    # no network, no rate-limit pause. Every other source, and SNOMED
+    # itself if the index is absent, falls through to the live API.
+    if sab == _SNOMED_SAB and _snomed_index:
+        return _snomed_relatives(code, kind)
+
     cached = _rel_cache.get((sab, code, kind))
     if cached is not None:
         return cached
