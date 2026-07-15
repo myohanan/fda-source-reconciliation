@@ -469,7 +469,7 @@ def load_sources() -> dict:
             "mondo_records": mondo_records}
 
 
-def trial_population_lookup(query: str) -> tuple[int, list[str]]:
+def trial_population_lookup(query: str) -> tuple[int, list[str], bool]:
     """
     Does the trial registry carry this string as a registered condition?
 
@@ -496,7 +496,12 @@ def trial_population_lookup(query: str) -> tuple[int, list[str]]:
                 request, timeout=UMLS_TIMEOUT_SECONDS) as response:
             payload = json.load(response)
     except Exception:  # noqa: BLE001
-        return 0, []
+        # A failed call is NOT zero trials. (0, [], False) records that
+        # the registry could not be checked -- distinct from a registry
+        # that answered and found nothing, which is (0, [], True). Same
+        # sealed-UNKNOWN discipline the UMLS path already uses: "could
+        # not check" must never read as "checked and found nothing."
+        return 0, [], False
 
     hits, seen = 0, set()
     for study in payload.get("studies", []):
@@ -508,7 +513,7 @@ def trial_population_lookup(query: str) -> tuple[int, list[str]]:
                 hits += 1
                 seen.add(condition)
     time.sleep(CTGOV_PAUSE_SECONDS)
-    return hits, sorted(seen)
+    return hits, sorted(seen), True
 
 
 GUIDANCE_DEFINED_POPULATIONS = {
@@ -628,7 +633,17 @@ def _fallback(name: str, query: str, context: dict,
     trial registry, and no cited guidance names this string. That is a
     FINDING about FDA's catalog, not a failure of the resolver.
     """
-    trials, registered = trial_population_lookup(query)
+    trials, registered, registry_ok = trial_population_lookup(query)
+    if not registry_ok:
+        # The registry could not be reached. Per the sealed-UNKNOWN
+        # rule, "we could not check" is not "this is not a condition."
+        # Report the failure honestly rather than falling through to
+        # NOT_A_CONDITION on a network error.
+        return _object(name, query, STATUS_LOOKUP_FAILED,
+                       near_misses=near_misses + [{
+                           "source": "clinicaltrials.gov",
+                           "reason": "REGISTRY_LOOKUP_FAILED",
+                           "candidate": query}])
     if trials >= CTGOV_MIN_TRIALS:
         return _object(
             name, query, STATUS_TRIAL_POPULATION,
