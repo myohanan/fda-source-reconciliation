@@ -20,3 +20,7 @@ fda_data/mondo_resolution_index.csv
 fda_data/mesh_desc.xml
 fda_data/mesh_disease_index.csv
 fda_data/icd10cm_index.csv
+fda_data/hierarchy_relation_cache.json
+fda_data/snomed_index.json
+fda_data/resolve_cache.json
+fda_data/SnomedCT_USEdition_*.zip
