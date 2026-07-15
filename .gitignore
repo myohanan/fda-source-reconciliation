@@ -24,3 +24,12 @@ fda_data/hierarchy_relation_cache.json
 fda_data/snomed_index.json
 fda_data/resolve_cache.json
 fda_data/SnomedCT_USEdition_*.zip
+fda_data/umls-*.zip
+fda_data/*.RRF
+fda_data/cui_index.json
+fda_data/umls-*.zip
+fda_data/*.RRF
+fda_data/cui_index.json
+fda_data/cui_code_index.json
+fda_data/cui_snomed_index.json
+fda_data/hierarchy_index.json
