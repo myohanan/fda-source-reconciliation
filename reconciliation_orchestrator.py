@@ -134,6 +134,30 @@ STEP_DEGRADED = "DEGRADED"
 STEP_SKIPPED = "SKIPPED"
 
 
+_VERBOSE = False
+
+_T0 = [None]
+
+
+def _progress(text):
+    """
+    Say what the pipeline is doing, while it does it.
+
+    Ninety seconds of silence reads as "it is broken." Ninety seconds
+    with visible progress reads as "it is working." The machine is idle
+    almost the whole time -- 1.7 seconds of CPU across a 90-second run,
+    2% utilization -- because every step waits on a vocabulary service
+    over the network. That is not a defect to hide; it is a fact to
+    show.
+    """
+    if _VERBOSE:
+        import time as _t
+        now = _t.time()
+        if _T0[0] is None:
+            _T0[0] = now
+        print("  ... %s  (+%.1fs)" % (text, now - _T0[0]), flush=True)
+
+
 def create_schema(query: str) -> dict:
     """One condition, one schema. Every step writes into it."""
     return {
@@ -170,6 +194,7 @@ def run(query: str, context: dict, catalog: dict, documents: list,
     global _RESOLVER_CONTEXT
     _RESOLVER_CONTEXT = context
 
+    _progress('resolving "%s" against ~200 vocabularies' % query)
     schema = create_schema(query)
 
     # ---- STEP 1: IDENTITY. Sealed. Nothing downstream re-derives it.
@@ -251,6 +276,7 @@ def run(query: str, context: dict, catalog: dict, documents: list,
         _seal(schema, "3_drug_lookup", STEP_SKIPPED, "unresolved")
         return schema
 
+    _progress("checking FDA's COA catalog")
     # ---- STEP 2: COAs. The empty result is an ANSWER.
     try:
         coa_result = coa.lookup(resolved, catalog, documents)
@@ -278,6 +304,7 @@ def run(query: str, context: dict, catalog: dict, documents: list,
         _seal(schema, "2b_hierarchy_matcher", STEP_SKIPPED,
               "a COA exists for this condition")
 
+    _progress("checking approved drugs -- two independent routes")
     # ---- STEP 3: DRUGS. Two routes, labeled, never blended.
     try:
         drug_result = drugs.lookup(resolved, drug_index, approvals)
@@ -488,9 +515,12 @@ def main() -> None:
               '"disease name" [--json]')
         return
 
+    global _VERBOSE
     as_json = "--json" in sys.argv
+    _VERBOSE = not as_json
     names = [a for a in sys.argv[1:] if not a.startswith("--")]
 
+    _progress("loading vocabularies and FDA source data")
     context = cr.load_sources()
     catalog = coa.load_catalog()
     documents = coa.load_documents()
