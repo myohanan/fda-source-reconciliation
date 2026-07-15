@@ -215,6 +215,58 @@ _MULTINAME_RE = re.compile(r"([^()]+?)\s*\(([A-Z][A-Za-z0-9\-]*)\)")
 _concept_cache: dict[str, dict] = {}
 _support_cache: dict[tuple[str, str], list[str]] = {}
 
+# Whole-resolution cache, keyed by normalized name and PERSISTED to disk.
+# resolve() does the full metathesaurus resolution -- ~200 vocabularies,
+# the semantic gate, the consumer-vocabulary discrimination -- and that
+# work does not change between runs for the same name. The neighbor walk
+# in the reconciliation orchestrator resolves every structural neighbor
+# (a condition can have dozens of siblings), and without persistence it
+# re-paid the full network cost for each one on every run: ~110 seconds
+# for a no-COA query. This does not change WHAT resolve() computes or
+# weaken the identity determination; it stops discarding the result.
+#
+# ONLY real determinations are cached. A LOOKUP_FAILED is a "could not
+# check," not an answer -- caching it would freeze a transient network
+# failure into a permanent wrong result, the exact confusion the
+# resolver exists to prevent. So failures are never written.
+_RESOLVE_CACHE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fda_data")
+_RESOLVE_CACHE_PATH = os.path.join(
+    _RESOLVE_CACHE_DIR, "resolve_cache.json")
+_resolve_cache: dict[str, dict] = {}
+_CACHEABLE_STATUSES = {
+    STATUS_RESOLVED,
+    STATUS_NOT_CONDITION,
+    STATUS_UNRESOLVED,
+}
+
+
+def _load_resolve_cache() -> None:
+    """Seed the resolution cache from disk. A missing file is fine."""
+    if not os.path.exists(_RESOLVE_CACHE_PATH):
+        return
+    try:
+        with open(_RESOLVE_CACHE_PATH, encoding="utf-8") as handle:
+            _resolve_cache.update(json.load(handle))
+    except Exception:  # noqa: BLE001
+        _resolve_cache.clear()
+
+
+def _save_resolve_cache() -> None:
+    """Write the resolution cache to disk after each new determination."""
+    os.makedirs(_RESOLVE_CACHE_DIR, exist_ok=True)
+    tmp_path = _RESOLVE_CACHE_PATH + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(_resolve_cache, handle)
+        os.replace(tmp_path, _RESOLVE_CACHE_PATH)
+    except Exception:  # noqa: BLE001
+        # A failed cache write must never take down a working lookup.
+        pass
+
+
+_load_resolve_cache()
+
 
 def _api_key() -> str:
     """Read UMLS_API_KEY from .env without dotenv's path guessing."""
@@ -755,6 +807,31 @@ def consumer_choice(contest: list[dict]) -> dict:
 
 
 def resolve(name: str, context: dict) -> dict:
+    """
+    Resolve one disease name -- reading a persisted result if this name
+    has been resolved before, otherwise doing the full resolution once
+    and saving it.
+
+    The cache is keyed on the normalized name. Only real determinations
+    are stored; a LOOKUP_FAILED is never cached, so a transient network
+    failure cannot freeze into a permanent wrong answer. The resolution
+    itself is unchanged -- this only stops repeating identical work.
+    """
+    key = normalize(name)
+    if key:
+        hit = _resolve_cache.get(key)
+        if hit is not None:
+            return dict(hit)
+
+    result = _resolve_uncached(name, context)
+
+    if key and result.get("status") in _CACHEABLE_STATUSES:
+        _resolve_cache[key] = result
+        _save_resolve_cache()
+    return result
+
+
+def _resolve_uncached(name: str, context: dict) -> dict:
     """
     Resolve one disease name. Returns a sealed condition object.
     Never re-derives, never blends, never guesses.
