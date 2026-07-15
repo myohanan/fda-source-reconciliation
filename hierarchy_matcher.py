@@ -112,6 +112,7 @@ THE RELATIONSHIP.
 """
 
 import json
+import os
 import sys
 import time
 import urllib.parse
@@ -123,6 +124,12 @@ UMLS = "https://uts-ws.nlm.nih.gov/rest"
 HEADERS = {"User-Agent": "fda-recon/1.0", "Accept": "application/json"}
 PAUSE = 0.12
 TIMEOUT = 40
+
+_CACHE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fda_data")
+_CACHE_PATH = os.path.join(_CACHE_DIR,
+                           "hierarchy_relation_cache.json")
+_KEY_SEP = "|"
 
 # Every source with a real is-a hierarchy, and its UMLS abbreviation.
 # Coverage measured across FDA's 54 COA conditions -- see the docstring.
@@ -160,6 +167,64 @@ _code_cache: dict[tuple[str, str], str] = {}
 _rel_cache: dict[tuple[str, str, str], list[tuple[str, str]]] = {}
 
 
+def _load_cache() -> None:
+    """
+    Seed _code_cache and _rel_cache from disk, if the file exists.
+
+    A missing or unreadable cache file is not an error -- it means this
+    is the first run, or the cache was deliberately cleared. Either way
+    the pipeline degrades to the pre-patch behavior (live calls), not a
+    crash.
+    """
+    if not os.path.exists(_CACHE_PATH):
+        return
+    try:
+        with open(_CACHE_PATH, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:  # noqa: BLE001
+        return
+
+    for key, value in raw.get("code_cache", {}).items():
+        parts = key.split(_KEY_SEP)
+        if len(parts) == 2:
+            _code_cache[(parts[0], parts[1])] = value
+
+    for key, value in raw.get("rel_cache", {}).items():
+        parts = key.split(_KEY_SEP)
+        if len(parts) == 3:
+            _rel_cache[(parts[0], parts[1], parts[2])] = [
+                tuple(pair) for pair in value
+            ]
+
+
+def _save_cache() -> None:
+    """
+    Write both caches to disk. Called after every new fetch, not only
+    at exit -- so a run that fails partway through (network drop,
+    Ctrl-C) still keeps whatever it already paid for.
+    """
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    payload = {
+        "code_cache": {
+            _KEY_SEP.join(k): v for k, v in _code_cache.items()
+        },
+        "rel_cache": {
+            _KEY_SEP.join(k): v for k, v in _rel_cache.items()
+        },
+    }
+    tmp_path = _CACHE_PATH + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        os.replace(tmp_path, _CACHE_PATH)
+    except Exception:  # noqa: BLE001
+        # A failed cache write must never take down a working lookup.
+        pass
+
+
+_load_cache()
+
+
 def _get(path: str, **params) -> dict:
     params["apiKey"] = cr.UMLS_API_KEY
     url = f"{UMLS}{path}?{urllib.parse.urlencode(params)}"
@@ -189,6 +254,7 @@ def code_in(cui: str, sab: str) -> str:
         code = ""
 
     _code_cache[(cui, sab)] = code
+    _save_cache()
     time.sleep(PAUSE)
     return code
 
@@ -211,6 +277,7 @@ def _relatives(sab: str, code: str,
         result = []
 
     _rel_cache[(sab, code, kind)] = result
+    _save_cache()
     time.sleep(PAUSE)
     return result
 
