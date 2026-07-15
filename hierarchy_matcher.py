@@ -201,6 +201,75 @@ def _snomed_relatives(code: str, kind: str) -> list[tuple[str, str]]:
     ids = node.get(kind, [])
     return [(i, _snomed_index.get(i, {}).get("name", "")) for i in ids]
 
+
+# Local is-a hierarchy for the sources with no tree of their own --
+# ICD10CM, NCI, MDR -- built from the UMLS release by
+# build_hierarchy_index.py. When present, _relatives reads parents,
+# children, and ancestors from here instead of the live API, the same
+# way SNOMED is served from its own index. A missing file is fine: the
+# affected source degrades to the live API, unchanged. (MeSH is served
+# through the live API for now; SNOMED has its own index above.)
+_HIERARCHY_INDEX_PATH = os.path.join(_CACHE_DIR, "hierarchy_index.json")
+_hierarchy_index: dict = {}
+
+
+def _load_hierarchy_index() -> None:
+    """Seed the local hierarchy index from disk. Missing file is fine."""
+    if not os.path.exists(_HIERARCHY_INDEX_PATH):
+        return
+    try:
+        with open(_HIERARCHY_INDEX_PATH, encoding="utf-8") as handle:
+            _hierarchy_index.update(json.load(handle))
+    except Exception:  # noqa: BLE001
+        _hierarchy_index.clear()
+
+
+_load_hierarchy_index()
+
+
+def _local_ancestors(sab_index: dict,
+                     code: str) -> list[tuple[str, str]]:
+    """
+    All ancestors of a code, walked transitively up the parent edges to
+    the root -- the same reproduction of the live API's full ancestor
+    chain that _snomed_ancestors does for SNOMED. The index stores only
+    IMMEDIATE parents; ancestors are parents-of-parents. A seen-set
+    guards a malformed hierarchy against cycles.
+    """
+    parents_map = sab_index.get("parents", {})
+    names = sab_index.get("names", {})
+    out: list[tuple[str, str]] = []
+    seen = {code}
+    frontier = [code]
+    while frontier:
+        current = frontier.pop()
+        for parent in parents_map.get(current, []):
+            if parent in seen:
+                continue
+            seen.add(parent)
+            out.append((parent, names.get(parent, "")))
+            frontier.append(parent)
+    return out
+
+
+def _local_relatives(sab: str, code: str,
+                     kind: str) -> list[tuple[str, str]]:
+    """
+    parents / children / ancestors of a code from the local hierarchy
+    index -- the same (id, name) shape the live _relatives returns. No
+    network, no pause.
+    """
+    sab_index = _hierarchy_index.get(sab)
+    if not sab_index:
+        return []
+    if kind == "ancestors":
+        return _local_ancestors(sab_index, code)
+    names = sab_index.get("names", {})
+    # "parents" -> the parents map; "children" -> the children map.
+    edge_map = sab_index.get(kind, {})
+    return [(c, names.get(c, "")) for c in edge_map.get(code, [])]
+
+
 # Every source with a real is-a hierarchy, and its UMLS abbreviation.
 # Coverage measured across FDA's 54 COA conditions -- see the docstring.
 SOURCES = {
@@ -234,6 +303,33 @@ _RANK = {
 }
 
 _code_cache: dict[tuple[str, str], str] = {}
+
+# Local CUI -> {sab: code} index, built from the UMLS release by
+# build_code_index.py. When present, code_in reads a concept's source
+# code from here instead of calling the UMLS API -- the same code the
+# API would return, without the network round trip. relate() calls
+# code_in for every source and both concepts, and the neighbor search
+# calls relate() against every catalog condition, so serving code_in
+# locally is what removes the ~110s hang. A missing index file is fine:
+# code_in falls back to the API, unchanged.
+_CODE_INDEX_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "fda_data", "cui_code_index.json")
+_code_index: dict = {}
+
+
+def _load_code_index() -> None:
+    """Seed the local code index from disk. Missing file is fine."""
+    if not os.path.exists(_CODE_INDEX_PATH):
+        return
+    try:
+        with open(_CODE_INDEX_PATH, encoding="utf-8") as handle:
+            _code_index.update(json.load(handle))
+    except Exception:  # noqa: BLE001
+        _code_index.clear()
+
+
+_load_code_index()
 _rel_cache: dict[tuple[str, str, str], list[tuple[str, str]]] = {}
 
 
@@ -311,6 +407,15 @@ def code_in(cui: str, sab: str) -> str:
     if cached is not None:
         return cached
 
+    # Local index first. It carries the same source code the API would
+    # return. Only when the index lacks this CUI do we fall through to
+    # the live API below.
+    if _code_index:
+        entry = _code_index.get(cui)
+        if entry is not None:
+            code = entry.get(sab, "")
+            _code_cache[(cui, sab)] = code
+            return code
     code = ""
     try:
         atoms = _get(f"/content/current/CUI/{cui}/atoms",
@@ -340,6 +445,12 @@ def _relatives(sab: str, code: str,
     # itself if the index is absent, falls through to the live API.
     if sab == _SNOMED_SAB and _snomed_index:
         return _snomed_relatives(code, kind)
+
+    # The other sources with a local tree (ICD10CM, NCI, MDR) are served
+    # from the hierarchy index when it carries this source. Same shape,
+    # no network. A source not in the index falls through to the API.
+    if sab in _hierarchy_index:
+        return _local_relatives(sab, code, kind)
 
     cached = _rel_cache.get((sab, code, kind))
     if cached is not None:
