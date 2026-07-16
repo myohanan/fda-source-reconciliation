@@ -529,22 +529,45 @@ rule.
 
 | Source | Access | Cost |
 |---|---|---|
-| UMLS Metathesaurus | API key | free (NLM account) |
+| UMLS Metathesaurus (includes SNOMED, MeSH, NCIt, ICD-10-CM, MedDRA) | API key | free (NLM account) |
 | ClinicalTrials.gov | public API | free |
 | openFDA | API key | free |
 | RxNorm / RxClass | public API | free |
-| MONDO, MeSH, ICD-10-CM | bulk download | free |
-| Drugs@FDA | bulk download | free |
+| MONDO | bulk download | free |
+| Drugs@FDA | bulk download / openFDA | free |
 
 **No licensed data. No proprietary vocabularies. Nothing here cannot be
 rebuilt from public sources by anyone with the two free API keys.**
 
-**Generated local artifacts** (all gitignored, all rebuildable from the
-sources above):
+### Live APIs, not maintained files
 
-| Artifact | Built by | Purpose |
+**The system is built to run on live API calls. It does not depend on
+downloading and keeping files up to date.** Identity resolution
+(UMLS), the hierarchy (SNOMED, MeSH, NCIt, ICD-10-CM, MedDRA — **all of
+which are UMLS source vocabularies**), trials (ClinicalTrials.gov),
+drug resolution (RxNav), and approvals (openFDA) are all live external
+authorities, maintained by NLM / NIH / FDA, not by this project. When
+those authorities update, the system gets the update through the API —
+there is nothing local to refresh.
+
+**The one exception is MONDO**, which is an OBO ontology, not a UMLS
+source vocabulary, so it is the single dataset that requires its own
+periodic download. Everything else is live.
+
+### Generated local artifacts — a redundant speed cache
+
+The local JSON indexes below **add no data.** They are cached copies of
+UMLS/SNOMED content (and precomputed results) that the APIs already
+serve live. They exist for one reason: walking the hierarchy live, per
+query, cost ~110 seconds; served from a local index it is ~1 second.
+**Pull these files and the system still runs — it just falls back to
+the live UMLS API and is slower.** They are a performance choice, not a
+data dependency, and each is rebuilt mechanically from a public release
+(no hand-curation, no judgment call).
+
+| Artifact | Built by | Caches |
 |---|---|---|
-| `cui_code_index.json`, `snomed_index.json`, `hierarchy_index.json` | `build_*_index.py` | local hierarchy, no per-query API calls |
-| `snomed_defined.json` | `build_defining_attributes.py` | the sibling gate's defined/grouper map |
-| `drug_resolve_cache.json` | `drug_resolver` (on use) | intervention → ingredient resolutions |
+| `cui_code_index.json`, `snomed_index.json`, `hierarchy_index.json` | `build_*_index.py` | UMLS/SNOMED hierarchy, to avoid per-query API calls |
+| `snomed_defined.json` | `build_defining_attributes.py` | SNOMED defining-attributes (the sibling gate's defined/grouper map) |
+| `drug_resolve_cache.json` | `drug_resolver` (on use) | RxNav intervention → ingredient resolutions |
 | `coa_cache.json` | `build_coa_cache.py` | pre-built COA-orchestrator results; demo speed + test fixture |
