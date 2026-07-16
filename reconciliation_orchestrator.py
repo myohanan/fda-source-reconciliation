@@ -25,9 +25,15 @@ PIPELINE SEQUENCE
               A key join on the CUI. The EMPTY RESULT is a first-class
               answer, not a failure.
 
-  Step 2b hierarchy_matcher   (only if Step 2 found NOTHING)
-              The settled identity -> what is NEARBY, and how it
-              relates.
+  neighbor_lookup       (only if Step 2 found NOTHING)
+              The settled identity -> which catalog conditions are
+              structurally related, and how. Six-source convergence
+              via hierarchy_matcher, CUI-to-CUI, never re-resolving a
+              name. Relations only.
+
+  neighbor_coa_lookup   (only if neighbor_lookup found neighbors)
+              The sealed neighbor list -> each neighbor's COAs,
+              attached verbatim from the catalog.
 
               An empty COA result is honest and nearly useless on its
               own. FDA's catalog holds 54 conditions and medicine holds
@@ -120,14 +126,10 @@ import coa_lookup as coa
 import condition_resolver as cr
 import drug_lookup as drugs
 import endpoint_search as es
-import hierarchy_matcher as hm
+import neighbor_lookup as nl
+import neighbor_coa_lookup as ncl
 
 PIPELINE_VERSION = "1.0"
-
-# The resolver context, loaded once and shared. The neighbor finder
-# needs it and is called from inside run(); passing it through every
-# frame would be noise.
-_RESOLVER_CONTEXT: dict = {}
 
 STEP_OK = "OK"
 STEP_DEGRADED = "DEGRADED"
@@ -174,6 +176,7 @@ def create_schema(query: str) -> dict:
         "calibration": {
             "near_misses": [],
             "degraded_steps": [],
+            "degraded_sources": [],
             "route_disagreements": 0,
         },
     }
@@ -191,9 +194,6 @@ def run(query: str, context: dict, catalog: dict, documents: list,
     """
     One condition, end to end. Returns the sealed schema.
     """
-    global _RESOLVER_CONTEXT
-    _RESOLVER_CONTEXT = context
-
     _progress('resolving "%s" against ~200 vocabularies' % query)
     schema = create_schema(query)
 
@@ -252,7 +252,8 @@ def run(query: str, context: dict, catalog: dict, documents: list,
         _seal(schema, "1_condition_resolver", STEP_DEGRADED,
               "UMLS unreachable")
         _seal(schema, "2_coa_lookup", STEP_SKIPPED, "lookup failed")
-        _seal(schema, "2b_hierarchy_matcher", STEP_SKIPPED,
+        _seal(schema, "neighbor_lookup", STEP_SKIPPED, "lookup failed")
+        _seal(schema, "neighbor_coa_lookup", STEP_SKIPPED,
               "lookup failed")
         _seal(schema, "3_drug_lookup", STEP_SKIPPED, "lookup failed")
         return schema
@@ -272,7 +273,8 @@ def run(query: str, context: dict, catalog: dict, documents: list,
             "resolved": False,
         }
         _seal(schema, "2_coa_lookup", STEP_SKIPPED, "unresolved")
-        _seal(schema, "2b_hierarchy_matcher", STEP_SKIPPED, "unresolved")
+        _seal(schema, "neighbor_lookup", STEP_SKIPPED, "unresolved")
+        _seal(schema, "neighbor_coa_lookup", STEP_SKIPPED, "unresolved")
         _seal(schema, "3_drug_lookup", STEP_SKIPPED, "unresolved")
         return schema
 
@@ -287,21 +289,19 @@ def run(query: str, context: dict, catalog: dict, documents: list,
         _seal(schema, "2_coa_lookup", STEP_DEGRADED,
               f"{type(exc).__name__}")
 
-    # ---- STEP 2b: NOTHING FOR YOUR CONDITION -- IS ANYTHING NEARBY?
-    # Only when the catalog came back empty. An empty answer is honest;
-    # an empty answer with no neighbors offered is nearly useless.
+    # ---- NEIGHBOR STEPS: NOTHING FOR YOUR CONDITION -- IS ANYTHING
+    # NEARBY? Only when the catalog came back empty and the condition
+    # has a CUI to relate from. Two single-function tools: neighbor_
+    # lookup finds the related catalog conditions (six-source, CUI to
+    # CUI, no re-resolution); neighbor_coa_lookup attaches their COAs.
+    # The conductor routes their sealed outputs; it neither relates nor
+    # attaches.
     if not schema["coas"].get("coas") and resolved.get("cui"):
-        try:
-            schema["neighbors"] = _find_neighbor_coas(
-                resolved, catalog, documents)
-            _seal(schema, "2b_hierarchy_matcher", STEP_OK,
-                  f'{len(schema["neighbors"])} neighbor(s) with a COA')
-        except Exception as exc:  # noqa: BLE001
-            schema["neighbors"] = []
-            _seal(schema, "2b_hierarchy_matcher", STEP_DEGRADED,
-                  f"{type(exc).__name__}")
+        _run_neighbor_steps(schema, resolved, catalog)
     else:
-        _seal(schema, "2b_hierarchy_matcher", STEP_SKIPPED,
+        _seal(schema, "neighbor_lookup", STEP_SKIPPED,
+              "a COA exists for this condition")
+        _seal(schema, "neighbor_coa_lookup", STEP_SKIPPED,
               "a COA exists for this condition")
 
     _progress("checking approved drugs -- two independent routes")
@@ -350,67 +350,50 @@ def run(query: str, context: dict, catalog: dict, documents: list,
     return schema
 
 
-def _find_neighbor_coas(resolved: dict, catalog: dict,
-                        documents: list) -> list[dict]:
+def _run_neighbor_steps(schema: dict, resolved: dict,
+                        catalog: dict) -> None:
     """
-    Nothing for this condition. Does FDA have one for a NEIGHBOR?
+    Route the two neighbor tools and seal each as its own step.
 
-    Walks the immediate structural neighborhood -- parents, children,
-    siblings -- and checks each against the catalog.
+    neighbor_lookup finds the structurally related catalog conditions
+    (six-source convergence, CUI to CUI). neighbor_coa_lookup attaches
+    each neighbor's COAs from the catalog. The conductor calls each,
+    records its sealed status, and stores the enriched neighbor list --
+    it does not relate, resolve, or attach anything itself.
 
-    It reports the RELATION, and nothing more. It does not say the
-    instrument applies. A COA qualified for chronic heart failure may or
-    may not be valid in an acute decompensated trial; that depends on
-    its context of use, and FDA is the one who decides.
-
-    Silence is not the same as absence. If the concept has no taxonomic
-    parent in ANY source -- as the seven trial-population conditions do
-    not -- the neighborhood is empty because there is nothing to walk,
-    and that is reported rather than returned as a blank.
+    Per-source failures from neighbor_lookup are recorded to
+    calibration.degraded_sources: a source that ERRORED could not vote,
+    which is a degradation, distinct from a source that answered "no
+    relation." The step is not failed by a degraded source; it
+    continues on the sources that answered.
     """
-    hood = hm.neighbors(resolved["cui"])
-    if not hood["hierarchy_available"]:
-        return []
+    _progress("nothing for this condition -- checking the neighborhood")
+    try:
+        neighbor_result = nl.find_neighbors(resolved, catalog)
+    except Exception as exc:  # noqa: BLE001
+        schema["neighbors"] = []
+        _seal(schema, "neighbor_lookup", STEP_DEGRADED,
+              f"{type(exc).__name__}")
+        _seal(schema, "neighbor_coa_lookup", STEP_SKIPPED,
+              "neighbor_lookup degraded")
+        return
 
-    # catalog conditions, keyed by CUI
-    catalog_cuis = catalog["by_cui"]
+    degraded = neighbor_result.get("degraded_sources", []) or []
+    if degraded:
+        schema["calibration"]["degraded_sources"].extend(degraded)
 
-    found = []
-    seen = set()
-    for relation, entries in (
-            ("PARENT", hood["parents"]),
-            ("CHILD", hood["children"]),
-            ("SIBLING", hood["siblings"])):
-        for _code, name in entries:
-            key = cr.normalize(name)
-            if key in seen:
-                continue
-            seen.add(key)
+    _seal(schema, "neighbor_lookup", STEP_OK,
+          neighbor_result.get("status", ""))
 
-            neighbor = cr.resolve(name, _RESOLVER_CONTEXT)
-            cui = neighbor.get("cui")
-            if not cui or cui not in catalog_cuis:
-                continue
-
-            coas = []
-            for entry in catalog_cuis[cui]:
-                coas.extend(entry["coas"])
-            if not coas:
-                continue
-
-            found.append({
-                "relation": relation,
-                "condition": name,
-                "cui": cui,
-                "coas": [{
-                    "instrument": c["instrument"],
-                    "qualified": c["qualified"],
-                    "stage": c["stage"],
-                    "context_of_use": c["context_of_use"],
-                } for c in coas],
-            })
-
-    return found
+    try:
+        attached = ncl.attach_coas(neighbor_result, catalog)
+        schema["neighbors"] = attached.get("neighbors", [])
+        _seal(schema, "neighbor_coa_lookup", STEP_OK,
+              attached.get("status", ""))
+    except Exception as exc:  # noqa: BLE001
+        schema["neighbors"] = []
+        _seal(schema, "neighbor_coa_lookup", STEP_DEGRADED,
+              f"{type(exc).__name__}")
 
 
 def _instrument_names(raw: str) -> list[str]:
@@ -479,9 +462,14 @@ def _assemble(schema: dict) -> dict:
     else:
         lines.append('DRUGS: none found by either route.')
 
+    # Presentation trims to the neighbors that actually carry a COA;
+    # neighbor_coa_lookup keeps COA-less neighbors in the data with
+    # coas == [], but the NEARBY line is about where FDA HAS an
+    # instrument. The complete list stays in schema["neighbors"].
     neighbors = schema.get("neighbors", [])
-    if not has_coa and neighbors:
-        for n in neighbors[:3]:
+    with_coas = [n for n in neighbors if n.get("coas")]
+    if not has_coa and with_coas:
+        for n in with_coas[:3]:
             marks = [c for c in n["coas"] if c["qualified"]]
             mark = " (QUALIFIED)" if marks else ""
             lines.append(
@@ -563,7 +551,11 @@ def main() -> None:
                           f'trials, {use.get("as_primary", "?")} as '
                           f'primary endpoint')
 
-        for n in schema.get("neighbors", [])[:3]:
+        # Display only the neighbors that carry a COA; the full list
+        # (including COA-less neighbors) is in schema["neighbors"].
+        display_neighbors = [
+            n for n in schema.get("neighbors", []) if n.get("coas")]
+        for n in display_neighbors[:3]:
             print()
             print(f'  NEARBY   : {n["condition"]}  '
                   f'[{n["relation"]} of your condition]')
@@ -587,6 +579,9 @@ def main() -> None:
         if schema["calibration"]["degraded_steps"]:
             print(f'  DEGRADED : '
                   f'{schema["calibration"]["degraded_steps"]}')
+        if schema["calibration"]["degraded_sources"]:
+            print(f'  DEGRADED SOURCES : '
+                  f'{schema["calibration"]["degraded_sources"]}')
         print()
 
 
