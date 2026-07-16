@@ -161,6 +161,33 @@ def _load_snomed_index() -> None:
 _load_snomed_index()
 
 
+# SNOMED concepts that have at least one DEFINING attribute (finding
+# site, associated morphology, etc.) versus pure GROUPERS that have
+# none. Built by build_defining_attributes.py from the RF2 Relationship
+# file. The sibling gate uses it: a sibling is inferred THROUGH a shared
+# parent, and is only meaningful if that parent is a real disease family
+# ("Heart failure", 3 defining attributes) rather than a classification
+# grouper ("Autosomal recessive hereditary disorder", 0 attributes). A
+# code present in this map is DEFINED; absent means grouper. A missing
+# file disables the gate (behaves as before), never crashes.
+_DEFINED_PATH = os.path.join(_CACHE_DIR, "snomed_defined.json")
+_snomed_defined: dict = {}
+
+
+def _load_defined_index() -> None:
+    """Seed the defining-attributes map from disk. Missing file is OK."""
+    if not os.path.exists(_DEFINED_PATH):
+        return
+    try:
+        with open(_DEFINED_PATH, encoding="utf-8") as handle:
+            _snomed_defined.update(json.load(handle))
+    except Exception:  # noqa: BLE001
+        _snomed_defined.clear()
+
+
+_load_defined_index()
+
+
 def _snomed_ancestors(code: str) -> list[tuple[str, str]]:
     """
     All ancestors of a SNOMED code, walked transitively up the is-a
@@ -488,6 +515,25 @@ def _relation_in(sab: str, code_a: str, code_b: str) -> tuple[str, list]:
     shared = ids_a & ids_b
     if shared:
         names = dict(parents_a + parents_b)
+        # DEFINING-ATTRIBUTES GATE (SNOMED only). A sibling is inferred
+        # THROUGH a shared parent; it is real only if that parent is a
+        # disease family, not a classification axis. A SNOMED parent
+        # with >= 1 defining attribute is a clinical entity ("Heart
+        # failure"); one with none is a grouper ("Autosomal recessive
+        # hereditary disorder"). Keep only DEFINED shared parents. If
+        # none survive, the two concepts share only a grouper -- that is
+        # a classification axis, not a relationship -- so they are
+        # UNRELATED for navigation. Congestive/chronic heart failure
+        # share "Heart failure" (defined) and remain SIBLING; Gaucher
+        # and cystic fibrosis share only "Autosomal recessive hereditary
+        # disorder" (grouper) and are correctly dropped.
+        if sab == _SNOMED_SAB and _snomed_defined:
+            defined_shared = [s for s in shared
+                              if _snomed_defined.get(s)]
+            if not defined_shared:
+                return REL_UNRELATED, []
+            return REL_SIBLING, [names[s]
+                                 for s in sorted(defined_shared)]
         return REL_SIBLING, [names[s] for s in sorted(shared)]
 
     ancestors_a = {u for u, _ in _relatives(sab, code_a, "ancestors")}
