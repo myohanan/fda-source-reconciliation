@@ -126,6 +126,7 @@ import coa_lookup as coa
 import condition_resolver as cr
 import drug_lookup as drugs
 import endpoint_search as es
+import trial_instruments as ti
 import neighbor_lookup as nl
 import neighbor_coa_lookup as ncl
 
@@ -134,7 +135,6 @@ PIPELINE_VERSION = "1.0"
 STEP_OK = "OK"
 STEP_DEGRADED = "DEGRADED"
 STEP_SKIPPED = "SKIPPED"
-
 
 _VERBOSE = False
 
@@ -190,7 +190,8 @@ def _seal(schema: dict, step: str, status: str, note: str = "") -> None:
 
 def run(query: str, context: dict, catalog: dict, documents: list,
         drug_index: dict, approvals: dict,
-        check_usage: bool = True) -> dict:
+        check_usage: bool = True,
+        check_instruments: bool = True) -> dict:
     """
     One condition, end to end. Returns the sealed schema.
     """
@@ -342,6 +343,33 @@ def run(query: str, context: dict, catalog: dict, documents: list,
     else:
         _seal(schema, "4_endpoint_search", STEP_SKIPPED,
               "no COA to check" if not found_coas else "disabled")
+
+    # ---- STEP 4b: WHAT DID THIS DISEASE'S APPROVAL TRIALS MEASURE?
+    # For the approved drugs found in Step 3, pull the outcome measures
+    # their trials used, flag which are FDA-qualified COAs, and group
+    # the rest for readability. This is the "what is actually being
+    # measured, and how little of it is a qualified COA" view.
+    drug_generics = sorted({
+        (d.get("generic") or "").strip()
+        for d in schema["drugs"].get("drugs", [])
+        if (d.get("generic") or "").strip()
+    })
+    if check_instruments and drug_generics:
+        try:
+            inst = ti.find_instruments(
+                schema["condition"]["label"] or query,
+                drug_generics, catalog)
+            schema["trial_instruments"] = inst
+            _seal(schema, "4b_trial_instruments", STEP_OK,
+                  f"{inst.get('n_instruments', 0)} measures")
+        except Exception as exc:  # noqa: BLE001
+            schema["trial_instruments"] = {"status": "LOOKUP_FAILED",
+                                           "instruments": []}
+            _seal(schema, "4b_trial_instruments", STEP_DEGRADED,
+                  f"{type(exc).__name__}")
+    else:
+        _seal(schema, "4b_trial_instruments", STEP_SKIPPED,
+              "no approved drugs" if not drug_generics else "disabled")
 
     # ---- STEP 5: THE FINDING. Assembled, not re-reasoned.
     schema["finding"] = _assemble(schema)
@@ -497,6 +525,133 @@ def _assemble(schema: dict) -> dict:
     }
 
 
+def _by_date(drug: dict) -> str:
+    """Sort key: approval date, empty dates last."""
+    d = drug.get("approved") or ""
+    return d if d else "9999-99-99"
+
+
+def _print_drug_line(drug: dict, show_indication: bool = False) -> None:
+    date = drug.get("approved") or "----------"
+    brand = (drug.get("brand") or "")[:24]
+    generic = (drug.get("generic") or "")[:26]
+    print(f'             {date}  {brand:<24}  {generic}')
+    if show_indication:
+        ind = (drug.get("indication") or "").strip()
+        if ind:
+            # The prose that produced a label-only match. Showing it is
+            # how a false positive (a cardiac agent matching "breast")
+            # stays visible instead of silently inflating a count.
+            print(f'                 indication: {ind[:70]}')
+
+
+def _print_drugs(drug_list: list) -> None:
+    """
+    The disease's approved drugs, grouped by which of the two routes
+    found them. Corroborated (both routes) lead, chronological -- that
+    ordering is the therapeutic history of the disease. Then the two
+    single-route groups, because a route DISAGREEMENT is a finding, not
+    noise: coded-only is MED-RT breadth beyond the approved label;
+    label-only is the prose match, shown WITH its indication text so a
+    string-match false positive is visible. NOTHING is capped -- how a
+    long list is paged is a front-end concern; the backend reports it
+    complete.
+    """
+    if not drug_list:
+        print('  DRUGS    : none found by either route.')
+        return
+
+    both = sorted([d for d in drug_list if d.get("both_routes")],
+                  key=_by_date)
+    coded_only = sorted(
+        [d for d in drug_list if not d.get("both_routes")
+         and "rxnorm_may_treat" in (d.get("routes") or [])],
+        key=_by_date)
+    label_only = sorted(
+        [d for d in drug_list if not d.get("both_routes")
+         and "openfda_indication" in (d.get("routes") or [])
+         and "rxnorm_may_treat" not in (d.get("routes") or [])],
+        key=_by_date)
+
+    print(f'  DRUGS    : {len(drug_list)} approved applications  '
+          f'({len(both)} corroborated by both routes)')
+
+    if both:
+        print()
+        print(f'    CORROBORATED -- both routes agree ({len(both)}), '
+              f'oldest first:')
+        for d in both:
+            _print_drug_line(d)
+
+    if coded_only:
+        print()
+        print(f'    CODED ROUTE ONLY ({len(coded_only)}) -- RxNorm '
+              f'may_treat; the approved label does not name this '
+              f'condition.')
+        print('    may_treat is BROADER than an approved indication '
+              '(off-label, class-level).')
+        for d in coded_only:
+            _print_drug_line(d)
+
+    if label_only:
+        print()
+        print(f'    LABEL ROUTE ONLY ({len(label_only)}) -- matched the '
+              f'openFDA indication text, not the coded route.')
+        print('    Indication text shown so a string-match false '
+              'positive is visible.')
+        for d in label_only:
+            _print_drug_line(d, show_indication=True)
+
+
+def _print_trial_instruments(schema: dict) -> None:
+    """
+    What the approved drugs' trials actually measured -- shown the way
+    trial_instruments shows it: every instrument by FULL NAME with its
+    trial count, split into FDA-qualified COAs, CDISC-recognized
+    instruments, and everything else. The scarcity of qualified COAs
+    against the length of the rest is the point.
+    """
+    inst = schema.get("trial_instruments", {})
+    measures = inst.get("instruments", [])
+    if not measures:
+        return
+    qcoa = [m for m in measures if m.get("category") == "qualified_coa"]
+    cdisc = [m for m in measures
+             if m.get("category") == "cdisc_instrument"]
+    other = [m for m in measures if m.get("category") == "other"]
+
+    def _line(m):
+        var = (f'  [{m["n_variants"]} phrasings]'
+               if m.get("n_variants") else "")
+        return (f'    {m["instrument"]}  '
+                f'({m["trials"]} trials, {m["as_primary"]} primary)'
+                f'{var}')
+
+    print()
+    print(f'  WHAT THE APPROVAL TRIALS MEASURED '
+          f'({inst.get("n_trials", 0)} trials, '
+          f'{len(measures)} distinct measures)')
+    print()
+    print(f'  FDA-QUALIFIED COAs used ({len(qcoa)}):')
+    if not qcoa:
+        print('    NONE -- no qualified COA appears in any of these '
+              'trials.')
+    for m in qcoa:
+        print(_line(m))
+    print()
+    print(f'  RECOGNIZED INSTRUMENTS (in CDISC, not FDA-qualified) '
+          f'({len(cdisc)}):')
+    if not cdisc:
+        print('    none.')
+    for m in cdisc:
+        print(_line(m))
+    print()
+    print(f'  OTHER measures -- not a recognized clinical instrument '
+          f'(PK, safety, labs, biomarkers) ({len(other)}):')
+    for m in other:
+        print(_line(m))
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print('usage: python3 reconciliation_orchestrator.py '
@@ -569,9 +724,9 @@ def main() -> None:
             print('             a REGULATORY judgment, not this tool\'s.')
 
         drug_list = schema["drugs"].get("drugs", [])
-        for drug in [d for d in drug_list if d["both_routes"]][:5]:
-            print(f'  DRUG     : {drug["approved"] or "----------"}  '
-                  f'{drug["brand"][:24]:<24} {drug["generic"][:24]}')
+        _print_drugs(drug_list)
+
+        _print_trial_instruments(schema)
 
         print()
         steps = {k: v["status"] for k, v in schema["steps"].items()}
