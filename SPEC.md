@@ -7,7 +7,7 @@ guarantees, and what it refuses to do.**
 
 ## 0. The contract
 
-Six single-function tools with sealed handoffs. Each does exactly one
+Single-function tools with sealed handoffs. Each does exactly one
 thing, emits a sealed result, and never reaches into another's
 business.
 
@@ -19,6 +19,18 @@ that produced it.
 **There is no generative step anywhere in the pipeline.** Key joins,
 coded lookups, typed-field gates, vote counts over declared
 vocabularies. A reviewer can walk any determination back to its cause.
+
+**No synonym list is created or maintained — ever.** Identity and
+relationships are resolved through published vocabularies (~200 in
+UMLS) and taxonomies (six hierarchy sources). "CHF," "congestive heart
+failure," and "carcinoma of lung" resolve without anyone writing a
+mapping. When FDA adds a COA condition, nobody adds synonyms; when a
+user types a lay term or an alternate phrasing, resolution and the
+hierarchy handle it. This is the maintainability guarantee: the system
+scales as vocabularies and the catalog grow, with no human-curated
+synonym table to maintain, drift, or leave incomplete. A synonym list
+is precisely what this architecture exists to avoid — it would be
+unmaintainable at the scale of medicine and wrong at the edges.
 
 ---
 
@@ -129,10 +141,37 @@ trial populations. **That is a category fact, not a coverage gap.** A
 trial enrollment definition has no taxonomic parent because it is not
 the kind of thing that has one.
 
+**The defining-attributes sibling gate (SNOMED).** A sibling is inferred
+THROUGH a shared parent, so it is only as meaningful as that parent. Two
+diseases that share a real disease-family parent are siblings; two that
+share only a *classification axis* — an inheritance pattern, a body-site
+grouping, a generic "disorder" node — are not. The discriminator is
+SNOMED's own concept model: a parent with at least one **defining
+attribute** (finding site, associated morphology, etc.) is a clinical
+entity; a parent with none is a grouper.
+
+    Heart failure (84114007)                     3 defining attributes  → real
+    Malignant neoplasm of lung (363358000)       2 defining attributes  → real
+    Autosomal recessive hereditary disorder      0 defining attributes  → grouper
+        (85995004)
+
+A SNOMED sibling whose shared parents are all groupers is resolved to
+`UNRELATED`. This keeps congestive/chronic heart failure (shared parent
+"Heart failure," defined) while dropping the Gaucher-disease/cystic-
+fibrosis false sibling (shared parent "Autosomal recessive hereditary
+disorder," a grouper). It is a **published, categorical** gate — the
+presence or absence of a concept model, not a threshold on a count — and
+it is the hierarchy analogue of the resolver's semantic-type gate. The
+defined/grouper map is built once by `build_defining_attributes.py` (see
+below) and read from `fda_data/snomed_defined.json`; if that file is
+absent the gate disables cleanly and the pre-gate behavior returns.
+
 **Refuses to:**
 - Report shared REMOTE ancestry as a relation. Every concept shares the
   root. Congestive and chronic heart failure share twenty SNOMED
   ancestors including "Disorder of thorax." That is not a relationship.
+- Report a sibling that rests only on a grouper parent (see the gate
+  above). Sharing a classification axis is not a relationship.
 - Say an instrument APPLIES. Surfacing a neighbor is navigation, not
   authorization. Whether a COA qualified for chronic heart failure is
   valid in an acute decompensated trial is a **regulatory judgment**,
@@ -290,7 +329,81 @@ verified — and that is also not OK.
 
 ---
 
-## 8. reconciliation_orchestrator
+## 7a. drug_resolver
+
+**Input:** a free-text intervention string (from a trial record).
+**Output:** a canonical drug identity, or a labeled non-resolution.
+
+    RESOLVED                  → ingredient_rxcui, ingredient (name)
+    UNRESOLVED_NOT_A_DRUG     → a control/non-drug (placebo, standard of
+                                care, GDMT, monotherapy...)
+    UNRESOLVED_NOT_IN_RXNORM  → a drug RxNorm does not carry (an
+                                investigational code)
+
+The canonical-object pattern applied to drugs, exactly parallel to
+condition_resolver applied to diseases: a free-text string is not an
+identity. ClinicalTrials.gov intervention names are messy — "Dapagliflozin",
+"Dapagliflozin 10mg Tab", "Dapagliflozin (Forxiga)", "dapagliflozine" are
+one drug written nine ways. Each resolves to its RxNorm **ingredient**
+rxcui, so the nine collapse to one. **Combinations keep all ingredients**
+sorted into one canonical key: "sacubitril/valsartan" stays distinct from
+either single drug; "LCZ696 (sacubitril/valsartan)" folds in via its
+parenthetical.
+
+**Guarantees:**
+- Controls fall out because they do not resolve to a drug ingredient —
+  a **principled** test, not a maintained blocklist of phrases.
+- An investigational drug RxNorm lacks is KEPT and labeled
+  `NOT_IN_RXNORM`, never silently dropped. "Could not resolve" and "not
+  a drug" are different facts with different names.
+- Same RxNav access pattern as `download_rxnorm_indications` (no key,
+  paced, cached to `fda_data/drug_resolve_cache.json`).
+
+---
+
+## 7b. coa_drug_link
+
+**Input:** a COA instrument name.
+**Output:** the FDA-APPROVED drugs whose trials used the instrument.
+
+Given a COA instrument, finds the ClinicalTrials.gov trials that
+registered it as an outcome measure, reads each trial's DRUG/BIOLOGICAL
+interventions, resolves each via `drug_resolver` to a canonical
+ingredient, and reports the approved ones with a per-drug trial count.
+
+**This is a CO-OCCURRENCE claim and nothing more.** "This drug was
+tested in trials that used this COA." It does **not** claim the drug was
+approved on the basis of the COA, or that the COA was a pivotal
+endpoint — the COA may have been secondary or exploratory. The same
+flat-statement-of-fact discipline the rest of the system uses.
+
+**Guarantees:**
+- Filtered to FDA-approved drugs (openFDA approved-label set, matched at
+  ingredient level). Investigational/discontinued compounds drop out
+  because they are not approved — the meaningful filter, not a label
+  quibble.
+- If the approved set cannot load, approval status is `UNKNOWN` and NO
+  filtering runs (all drugs shown, labeled) — never a false "unapproved."
+- Standalone. It does not touch the reconciliation orchestrator.
+
+---
+
+## 8. Orchestration — two views
+
+The tools compose into two orchestrations over the same sealed identity.
+They share every underlying tool; they differ in scope and framing.
+
+- **`reconciliation_orchestrator`** — the expansive everything-view.
+  Resolves, checks COAs, finds neighbors, lists approved drugs for the
+  disease, checks endpoint usage, and assembles the finding.
+- **`coa_orchestrator`** — the tight, COA-focused view (the demo MVP).
+  Everything it shows is shaped by the COA: for each COA in the picture
+  (the disease's own, or a neighbor's), it pulls that instrument's
+  trials and the approved drugs those trials tested. When there is no
+  COA anywhere, it says so and shows nothing on drugs or trials, because
+  there is no COA to hang them on.
+
+### 8a. reconciliation_orchestrator
 
 **Fixed sequence. Sealed handoffs. Degradation, not halt.**
 
@@ -315,6 +428,56 @@ continues. It does NOT emit a false negative.**
 are completely different facts, and a user cannot tell them apart from
 a blank. The schema records which one happened, in `steps` and
 `calibration.degraded_steps`.
+
+### 8b. coa_orchestrator
+
+**Same tools, COA-shaped scope. Cache-backed for demos.**
+
+    resolve → coa_lookup
+              (if no own COA) neighbor_lookup + neighbor_coa_lookup
+              PER COA INSTRUMENT in the picture:
+                  endpoint_search   → its trials, primary vs secondary
+                  coa_drug_link     → approved drugs those trials tested
+              (no COA anywhere)     → honest empty; no drugs, no trials
+
+Every drug and trial traces to a COA. A disease with its own COA shows
+that COA's evidence; a disease with none shows a related condition's COA
+(sibling/child/ancestor) with the same evidence; a disease with no COA
+anywhere gets the plain "nothing here, nothing nearby" — which is the
+exact fact FDA's own page cannot state.
+
+**Qualified-but-unused COAs are a finding, not noise.** A qualified COA
+that no trial ever used (zero trials in the registry) is surfaced as
+such — FDA vetted an instrument nobody picked up. The display collapses
+these into a summary line rather than empty blocks.
+
+**Runs live or from cache.** The pipeline is built to run live against
+the APIs (ClinicalTrials.gov, RxNav, openFDA, UMLS). For sharing and
+demonstration, the COA results are pre-built into a local JSON
+(`fda_data/coa_cache.json`) by `build_coa_cache.py`, so queries render
+instantly with no network calls. `coa_orchestrator.run_cached` reads the
+cache when the query is present and runs live otherwise. **There are
+only 54 COA conditions**, so precomputing the entire universe is trivial
+— this is not a workaround for a large dataset, it is that the whole
+space is small enough to cache completely. The same JSON doubles as a
+deterministic, offline **test fixture**.
+
+### 8c. Index and cache builders
+
+Offline, one-time builds that distill a slow source into a fast local
+artifact. Each follows the same pattern the hierarchy indexes use: read
+the big source once, write a small JSON, read it instantly thereafter.
+
+- **`build_defining_attributes.py`** → `fda_data/snomed_defined.json`.
+  Reads SNOMED's RF2 Relationship file, records which concepts have ≥1
+  defining attribute. Feeds the §3 sibling gate.
+- **`build_coa_cache.py`** → `fda_data/coa_cache.json`. Runs the COA
+  orchestrator for every catalog condition plus a set of demo queries.
+  Resumable (writes after each, skips cached), so an interrupted run is
+  continued by re-running.
+
+All generated JSON artifacts are gitignored; the builders are the record
+of how they were produced.
 
 ---
 
@@ -375,3 +538,13 @@ rule.
 
 **No licensed data. No proprietary vocabularies. Nothing here cannot be
 rebuilt from public sources by anyone with the two free API keys.**
+
+**Generated local artifacts** (all gitignored, all rebuildable from the
+sources above):
+
+| Artifact | Built by | Purpose |
+|---|---|---|
+| `cui_code_index.json`, `snomed_index.json`, `hierarchy_index.json` | `build_*_index.py` | local hierarchy, no per-query API calls |
+| `snomed_defined.json` | `build_defining_attributes.py` | the sibling gate's defined/grouper map |
+| `drug_resolve_cache.json` | `drug_resolver` (on use) | intervention → ingredient resolutions |
+| `coa_cache.json` | `build_coa_cache.py` | pre-built COA-orchestrator results; demo speed + test fixture |
