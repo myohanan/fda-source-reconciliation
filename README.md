@@ -1,56 +1,48 @@
 # FDA Source Reconciliation
 
-**A user types a disease — any way they say it. What does FDA have for
-it, and what does FDA not have?**
-
-FDA has four public resources for clinical outcome assessments. Each can
-show what it contains. None can show how its contents connect to the
-others, because the four do not share a common key. This project is the
-layer that builds that key and reconciles them — against each other, and
-against the trial and drug-approval data the four never reference.
+FDA has four public resources for clinical outcome assessments (COAs).
+Each one holds real, valuable information. But they were built
+separately and don't share a common identifier, so today it's hard to
+move between them or connect them to a disease as someone would actually
+search for it. This project builds that connecting layer.
 
 ---
 
-## The four resources — and why a website refresh cannot unify them
+## The four resources
 
-The starting point was a proposal to refresh FDA's four public COA
-resources into a better web experience. The four:
+The starting point was a proposal to bring FDA's four public COA
+resources into one better experience. The four:
 
 | Resource | What it holds |
 |---|---|
 | **DDT portal** (Drug Development Tools) | COA qualification submissions and their status |
-| **COA submissions page** | The process view — every COA submitted to the program, at any stage |
-| **Program overview PDF** | A static description of the qualification program |
-| **COA Compendium** | The outcome view — the catalog of COAs that completed qualification |
+| **COA submissions page** | Every COA submitted to the program, at any stage — the pipeline in motion |
+| **Program overview PDF** | A description of the qualification program |
+| **COA Compendium** | The COAs that have completed qualification — the finished set |
 
-The submissions page and the Compendium are two ends of the same
-pipeline: the submissions page is what is *in motion* (letter of intent,
-in progress, qualified, withdrawn); the Compendium is what has *finished*
-qualification.
+The submissions page and the Compendium are two ends of one pipeline:
+the submissions page shows what's in motion (letter of intent, in
+progress, qualified, withdrawn); the Compendium shows what has finished.
 
-Each resource can display what it contains. None can display how its
-contents connect — to each other, or to a disease as a user would type
-it — because **the four do not share a key.** The DDT portal's project
-numbers, the Compendium's instrument names, the submissions on the page,
-and a disease name are four different identifier spaces. A website
-refresh makes each resource easier to read. It cannot surface a
-connection that does not exist in the data underneath.
-
-This system is that missing layer. It resolves a disease to a settled
-identity that every resource can be joined to, then reconciles the four
-against it — and against the trial registry and the drug approvals the
-four never reference. The DDT portal's name is the tell: these are
-*Drug Development* Tools. A unified view of them has to connect the
-outcome-assessment instrument to the drug development it serves — which
-is exactly the connection the four disconnected resources cannot
-provide, and the one this layer creates.
+Bringing these together is the right goal — they clearly belong
+together. The reason it takes more than a redesigned page is that the
+four don't share a key: the DDT portal's project numbers, the
+Compendium's instrument names, the submissions listing, and a disease
+name are four separate identifier spaces. A connection can only be
+shown once it exists in the data, so the connecting has to happen
+underneath before any front end can present it. That underneath layer
+is what this builds.
 
 ---
 
-## The demonstration — one instrument, three ways to ask
+## Tell me about a specific disease
+
+You want to know what COAs FDA has for a disease you care about — and if
+it has none, whether anything close does. You type the disease however
+you'd naturally say it; you don't have to know the exact term FDA used.
 
 FDA qualified the NSCLC-SAQ for a precise population: **Non-Small Cell
-Lung Carcinoma**. Type that exact name, and you get a direct hit.
+Lung Carcinoma**. Type that exact name and you get a direct hit:
 
     $ python3 coa_orchestrator.py "Non-Small Cell Lung Carcinoma"
 
@@ -58,13 +50,11 @@ Lung Carcinoma**. Type that exact name, and you get a direct hit.
     COA: NSCLC Symptom Assessment Questionnaire (NSCLC-SAQ)  [QUALIFIED]
          from: this condition
          33 trials used it. Approved drugs in those trials include
-         pembrolizumab, carboplatin, pemetrexed, cisplatin, docetaxel,
-         osimertinib — 15 in all.
+         pembrolizumab, carboplatin, pemetrexed, osimertinib — 15 in all.
 
-But a clinician might not type the exact qualified name. They might just
-say **lung carcinoma**, dropping "non-small cell." The system still
-lands on the right instrument — now recognizing NSCLC as a more specific
-*child* of what was typed.
+A clinician might drop "non-small cell" and just type **lung
+carcinoma**. It still lands, recognizing NSCLC as a more specific kind
+of what was typed:
 
     $ python3 coa_orchestrator.py "lung carcinoma"
 
@@ -72,8 +62,8 @@ lands on the right instrument — now recognizing NSCLC as a more specific
     COA: NSCLC-SAQ  [QUALIFIED]
          from: Non-Small Cell Lung Carcinoma (CHILD of your condition)
 
-Or they might type it the way most people would — clinician or patient —
-**lung cancer**. Still lands, now through a deeper path.
+Or someone might type it the way most people would — **lung cancer**.
+Still lands, through a longer path:
 
     $ python3 coa_orchestrator.py "lung cancer"
 
@@ -81,109 +71,101 @@ Or they might type it the way most people would — clinician or patient —
     COA: NSCLC-SAQ  [QUALIFIED]
          from: Non-Small Cell Lung Carcinoma (DESCENDANT of your condition)
 
-**Three ways of asking, one right answer — reached through three
-different relationships.** These are not synonyms: "lung cancer," "lung
-carcinoma," and "non-small cell lung carcinoma" are distinct concepts at
-different levels of clinical precision. The system resolves each to its
-real identity and navigates published medical taxonomy to connect them.
+Three ways of asking, one right answer. You don't have to know the exact
+term FDA used. The relationship is labeled on purpose — **this
+condition**, **child**, **descendant** — so you can see whether the
+instrument fits your population and decide for yourself.
+
+It connects those different names through the published medical
+vocabularies NLM and NIH already maintain. "Lung cancer," "lung
+carcinoma," and "non-small cell lung carcinoma" are the same idea at
+different levels of precision, and the taxonomy already knows how they
+relate. The benefit to you: no synonym list to build or keep current,
+and no need to convene clinicians to decide case by case what relates to
+what. It works for any disease with a COA, now or later, and stays
+current because those vocabularies are maintained for you.
+
+When a disease genuinely has no COA and nothing close does, it says so
+plainly. And a qualified COA that no trial ever used is surfaced too —
+an instrument that was vetted but never picked up.
 
 ---
 
-## What "child" and "descendant" mean — and why this beats a synonym list
+## Show me what's actually in the catalog
 
-The relationship is shown on purpose. In plain terms:
+The other thing you want is a clear picture of the catalog itself: how
+many COAs there are, how many were submitted, how many reached the
+letter-of-intent stage and went no further, which are qualified and
+which weren't accepted, and what exists for a given disease or under a
+given instrument name.
 
-- **This condition** — an exact match. The COA is qualified for precisely
-  what you typed.
-- **Child** — the COA is qualified for something *one step more specific*
-  than what you typed. You asked for "lung carcinoma"; the COA is for
-  "non-small cell lung carcinoma," a specific kind of it.
-- **Descendant** — the same idea, further down. You asked for "lung
-  cancer"; the COA is for a specific type several steps below.
+The catalog search answers these. It reads both resources — the
+submissions pipeline and the finished Compendium — and every query opens
+with a count summary before the detail:
 
-These are **not** the same thing, and the system says so rather than
-hiding it. That is the advantage over a synonym list.
+    $ python3 list_coas.py
 
-Imagine a researcher studying **squamous cell carcinoma of the lung** who
-types "lung cancer." The NSCLC-SAQ surfaces — labeled as a *descendant*
-relationship, for non-small cell lung carcinoma. The researcher
-immediately sees two things: this instrument is *related* to their area,
-and it is *not* an exact match for their specific disease. They can then
-judge whether it fits — exactly the call a clinical or regulatory expert
-should make, not the software.
+    SUMMARY
+      Submissions: 72
+           53  Letter of Intent- Accepted
+            7  Letter of Intent- Not Accepted
+            3  Qualification Plan- Accepted
+            ...
+      Compendium (completed): 199
 
-A synonym list would have failed this researcher one of two ways: it
-would have wrongly equated "lung cancer" with a specific instrument, or
-it would not have connected them at all. The relationship approach does
-neither. It surfaces the connection, names its nature honestly, and
-leaves the judgment where it belongs. **It does not punish you for
-coming close, and it does not pretend related things are identical.**
+So at a glance: 72 COAs submitted, 53 of them still sitting at letter of
+intent, and 199 that completed qualification. From there you can narrow:
 
----
+    $ python3 list_coas.py --search "SDMT"           # one instrument's record
+    $ python3 list_coas.py --search "walk"           # every walk-test COA
+    $ python3 list_coas.py --stage "letter of intent"
+    $ python3 list_coas.py --type PerfO
 
-## Built to scale, with nothing to maintain
-
-This is not built for the few dozen conditions that happen to have a COA
-today. It is built for any disease FDA has — or will have — a COA for.
-Add a new COA condition tomorrow and it works, with:
-
-- **No synonym list.** There is no table equating "lung cancer" with
-  "lung carcinoma" for anyone to write, maintain, or leave incomplete.
-  The relationships come from published medical taxonomy.
-- **No convened judgment calls.** Nobody has to bring in clinicians to
-  decide, case by case, what relates to what. The taxonomy already
-  encodes it.
-- **No nonsense.** When no authority can tell two concepts apart, the
-  system says so and stops, rather than returning a plausible wrong
-  answer. It refuses rather than guesses.
-
-It stands on public medical vocabularies maintained by NLM and NIH, so
-what has to stay current is maintained by them, not by this project.
-
----
-
-## The COA-focused view
-
-    resolve the disease
-      → does it have its own COA?
-      → if not, does a related condition have one? (child / sibling /
-        descendant / ancestor)
-      → for each COA in the picture: the trials that used it, and the
-        approved drugs those trials tested
-      → no COA anywhere: say so plainly
-
-Every drug and every trial shown traces to a COA. Where a disease has no
-COA and none nearby — a real gap — the system says exactly that, which is
-the fact FDA's own page cannot state.
-
-A qualified COA that no trial ever used is surfaced as its own finding:
-FDA vetted an instrument nobody picked up. For a demo, results are
-pre-built into a local file so they render instantly; there are only 54
-COA conditions, so the entire universe fits in a cache.
+Search by disease, by instrument name or abbreviation, by qualification
+stage, or by COA type — and combine them.
 
 ---
 
 ## The tools
 
-Each does exactly one thing, emits a sealed result, and never reaches
-into another's business. **There is no generative step anywhere** — key
-joins, coded lookups, typed-field gates, votes over declared
-vocabularies. Every determination is traceable to the authority that
-made it.
+Each tool does one thing and hands a clean result to the next. There's
+no generative step anywhere — every result is a key join, a coded
+lookup, or a vote over published vocabularies, traceable back to the
+authority that produced it.
 
-| Tool | One job |
-|---|---|
-| `condition_resolver.py` | A disease name → a settled identity (a CUI). UMLS (~200 vocabularies), semantic gate, two-vocabulary minimum, ClinicalTrials.gov for trial populations. |
-| `coa_lookup.py` | A settled identity → FDA's COAs, or an honest none. **The empty result is the product.** |
-| `hierarchy_matcher.py` | Two identities → their relation. Six sources; convergence decides. A SNOMED sibling is gated on defining attributes so a real disease-family relation survives and a classification-axis artifact does not. |
-| `neighbor_lookup.py` | A settled identity → the catalog conditions structurally related to it, and how. |
-| `neighbor_coa_lookup.py` | Those neighbors → each with its COAs attached, verbatim. |
-| `drug_lookup.py` | A settled identity → approved drugs, by two independent routes, each labeled, never blended. |
-| `drug_resolver.py` | A free-text trial intervention → a canonical RxNorm ingredient. The canonical-object pattern applied to drugs; fragments collapse, combinations stay whole, controls fall out. |
-| `coa_drug_link.py` | A COA instrument → the approved drugs whose trials used it. **Co-occurrence only — never an approval-causation claim.** |
-| `endpoint_search.py` | An instrument name → every trial that registered it as an outcome. Verbatim text, never a boolean. |
-| `coa_orchestrator.py` | The COA-focused view (above). Cache-backed for instant demos. |
-| `reconciliation_orchestrator.py` | The expansive everything-view. Routes sealed outputs; never re-derives. |
+The two experiences above:
+
+- **`coa_orchestrator.py`** — "tell me about a specific disease": type a
+  disease, get its COAs and the trials and approved drugs connected to
+  them. Cache-backed, so it's instant.
+- **`list_coas.py`** — "show me what's in the catalog": search both COA
+  resources by disease, instrument, stage, or type.
+
+The single-purpose tools they build on:
+
+- **`condition_resolver.py`** — a disease name to a settled identity (a
+  CUI), using UMLS (~200 vocabularies) plus ClinicalTrials.gov for trial
+  populations.
+- **`coa_lookup.py`** — an identity to FDA's COAs for it, or an honest
+  none.
+- **`hierarchy_matcher.py`** — two identities to how they're related
+  (parent, child, sibling, descendant), by agreement across six
+  vocabularies.
+- **`neighbor_lookup.py`** / **`neighbor_coa_lookup.py`** — the related
+  catalog conditions, and their COAs.
+- **`drug_lookup.py`** — an identity to approved drugs, by two
+  independent routes, each labeled.
+- **`drug_resolver.py`** — a free-text trial drug name to a canonical
+  RxNorm ingredient.
+- **`coa_drug_link.py`** — a COA to the approved drugs whose trials used
+  it (co-occurrence, not an approval claim).
+- **`endpoint_search.py`** — an instrument name to every trial that
+  registered it as an outcome.
+- **`reconciliation_orchestrator.py`** — a fuller everything-view that
+  also pulls the approved drugs and what their trials measured.
+- **`trial_instruments.py`** *(prototype)* and **`group_measures.py`**
+  *(utility)* — for a disease's approved drugs, what their trials
+  measured, grouped for readability.
 
 ---
 
@@ -196,16 +178,15 @@ Two API keys, both free, both in `.env` (gitignored):
     OPENFDA_API_KEY=...     # https://open.fda.gov/apis/authentication/
     UMLS_API_KEY=...        # https://uts.nlm.nih.gov/uts/profile
 
-The UMLS key is required — it is the resolver's authority. **There is no
-Anthropic or other LLM key, because there is no generative step.** The
-whole system is deterministic.
+The UMLS key is the resolver's authority. There's no LLM key, because
+there's no generative step — the whole system is deterministic.
 
 ## What it stands on
 
 Identity (UMLS, which includes SNOMED, MeSH, NCIt, ICD-10-CM, MedDRA),
 trials (ClinicalTrials.gov), drug resolution (RxNav), and approvals
 (openFDA) are all live public authorities. The local index files are a
-redundant speed cache of that content — pull them and the system still
-runs, just slower. MONDO is the one vocabulary not in UMLS and is the
-single dataset that needs its own download. Nothing here is licensed or
-proprietary; anyone with the two free keys can rebuild all of it.
+speed cache of that same content — remove them and it still runs, just
+slower. MONDO is the one vocabulary not in UMLS, so it's the single
+dataset that needs its own download. Nothing here is licensed or
+proprietary.
