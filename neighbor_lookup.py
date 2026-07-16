@@ -25,6 +25,15 @@ regulatory judgment, FDA's). It does not stop the run when a source
 errors -- it records that source as degraded, for calibration, and
 continues with the sources that answered.
 
+WHERE THE SIBLING GATE LIVES. The judgment that a shared-parent sibling
+is a real disease-family relation rather than a classification-axis
+artifact (Gaucher/CF sharing only "autosomal recessive disorder") is
+made in hierarchy_matcher, by the defining-attributes gate -- because
+it is a fact about the ontology, not about navigation. By the time a
+relation reaches this tool, a grouper-only sibling has already been
+resolved to UNRELATED and will not appear. This tool surfaces what
+relate() returns.
+
 THREE COMPLETED-CHECK OUTCOMES, plus per-source degradation:
   NEIGHBORS_FOUND        one or more catalog conditions relate
   NO_NEIGHBOR_IN_CATALOG has a CUI, search completed, none related
