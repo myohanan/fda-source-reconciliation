@@ -1,6 +1,6 @@
 # PLANNING.md — FDA Source Reconciliation
 
-Last updated July 12, 2026. Architecture and scope; data findings live
+Last updated July 16, 2026. Architecture and scope; data findings live
 in `fda_data/SPIKE_FINDINGS.md`. The parked axis-schema experiment lives
 in `COA_AXES.md`.
 
@@ -20,25 +20,48 @@ that do not exist underneath. Confirmed on real data, not inferred.
 
 ## 1. Status: BUILT AND WORKING
 
-Six tools, all committed, all validated against FDA's own data.
+All tools committed and validated against FDA's own data. Each does one
+thing and hands a sealed result to the next.
 
 | Tool | One job | State |
 |---|---|---|
 | `condition_resolver` | a disease NAME -> a settled IDENTITY | 53/54 |
 | `coa_lookup` | identity -> FDA's COAs, or an honest none | works |
 | `hierarchy_matcher` | two identities -> their RELATION | 47/54 have one |
+| `neighbor_lookup` | identity -> the related catalog conditions, and how | works |
+| `neighbor_coa_lookup` | those neighbors -> their COAs, attached | works |
 | `drug_lookup` | identity -> approved drugs, two routes | works |
+| `drug_resolver` | a trial's free-text drug string -> a canonical ingredient | works |
+| `coa_drug_link` | a COA -> the approved drugs whose trials used it | works |
 | `endpoint_search` | an instrument -> the trials that used it | works |
-| `reconciliation_orchestrator` | the conductor | works |
+| `coa_orchestrator` | the COA-focused view; cache-backed for demos | works |
+| `reconciliation_orchestrator` | the expansive everything-view | works |
+
+The system now has TWO orchestrations over the same sealed identity: a
+tight, COA-focused view (the demo MVP) and the expansive reconciliation
+view. They share every underlying tool and differ only in scope.
 
 ## 2. The pipeline
 
     Step 1   condition_resolver     SEALED IDENTITY
     Step 2   coa_lookup             COAs, or an honest none
-    Step 2b  hierarchy_matcher      only if Step 2 found NOTHING
+             neighbor_lookup        only if Step 2 found NOTHING
+             neighbor_coa_lookup    only if neighbors were found
     Step 3   drug_lookup            approved drugs, two routes
     Step 4   endpoint_search        only if Step 2 found a COA
     Step 5   the finding            assembled, not re-reasoned
+
+The neighbor search (finding a RELATED catalog condition, and attaching
+its COAs) is split into two tools, so a failure in one is diagnosable
+without reading the other. Both run only when the disease itself has no
+COA — ranging outward when a direct answer exists would substitute the
+system's judgment for FDA's.
+
+The COA-focused orchestration (`coa_orchestrator`) uses these same tools
+in a tighter arrangement: for each COA in the picture — the disease's
+own, or a related condition's — it pulls that instrument's trials
+(`endpoint_search`) and the approved drugs those trials tested
+(`coa_drug_link`). Every drug and trial it shows traces to a COA.
 
 **There is no generative step. Not one.** Key joins, coded lookups,
 typed-field gates, vote counts over declared vocabularies. Every
@@ -56,30 +79,46 @@ never merged with the coded count — which is how the Cardiolite false
 positive (a cardiac imaging agent matching "breast") stays visible
 instead of silently inflating a number.
 
-## 3. The demonstration
+## 3. The demonstration — one instrument, three ways to ask
 
-    QUERY: "congestive heart failure"
+FDA qualified the NSCLC-SAQ for a precise population: Non-Small Cell
+Lung Carcinoma. Typed exactly, it is a direct hit:
 
-    Congestive heart failure (C0018802)
-      identity: 28 independent vocabularies agreed
+    QUERY: "Non-Small Cell Lung Carcinoma"
 
-    COA: NONE. Checked all 52 distinct conditions in FDA's catalog.
+    Non-Small Cell Lung Carcinoma (C0007131)
+    COA: NSCLC Symptom Assessment Questionnaire (NSCLC-SAQ) [QUALIFIED]
+         from: this condition
+         33 trials used it; approved drugs in those trials include
+         pembrolizumab, carboplatin, pemetrexed, osimertinib — 15 in all.
 
-    NEARBY: Chronic heart failure is a SIBLING of your condition, and
-    FDA has 4 COAs for it, one QUALIFIED. These are DIFFERENT
-    concepts. Whether the instrument applies to your population is a
-    regulatory judgment — read its context of use.
+A clinician might drop "non-small cell." The system still lands on the
+right instrument, now via a more-specific CHILD:
 
-    DRUGS: 1,028 applications; 143 corroborated by both routes.
+    QUERY: "lung carcinoma"
 
-    >>> FDA has approved therapies for this disease and has no
-        qualified instrument to measure outcomes in it.
+    Carcinoma of lung (C0684249)
+    COA: NSCLC-SAQ [QUALIFIED]
+         from: Non-Small Cell Lung Carcinoma (CHILD of your condition)
 
-Every clause is load-bearing. **SIBLING** — the relation, named.
-**DIFFERENT concepts** — the thing a synonym list destroys. **Regulatory
-judgment** — the line the tool refuses to cross.
+Or they type it the way most people would — clinician or patient. Still
+lands, now via a DESCENDANT:
 
-FDA's page today returns a blank for this query.
+    QUERY: "lung cancer"
+
+    Malignant neoplasm of lung (C0242379)
+    COA: NSCLC-SAQ [QUALIFIED]
+         from: Non-Small Cell Lung Carcinoma (DESCENDANT of your condition)
+
+Three ways of asking, one right answer, reached through three different
+RELATIONSHIPS. These are not synonyms — they are distinct concepts at
+different levels of precision. The relation is named on purpose: it is
+specific when the user is specific (ask for NSCLC and you are not
+misdirected to a small-cell instrument) and forgiving when they are not.
+A synonym list would either collapse the distinction or miss the
+connection; this preserves it and leaves the judgment to the expert.
+
+FDA's page today does none of this.
 
 ## 4. Why a synonym list cannot do this
 
@@ -209,6 +248,17 @@ let MedDRA's lone SIBLING beat three sources saying DESCENDANT on NSCLC
 vs lung cancer. Fixed: vote count first, relation rank only as
 tiebreak.)
 
+**The breadth of sources is the SENSITIVITY arm — nothing more.** Asking
+several independent taxonomies means a real relationship is unlikely to
+be missed. But breadth alone also surfaces false ones (see the
+false-sibling case in §9). SPECIFICITY does not come from the number of
+sources; it comes from the gates and the way they are sequenced in the
+orchestration — the two-vocabulary minimum, the semantic-type gate, the
+convergence rule, and the defining-attributes sibling gate. The whole
+design is a hierarchical structure over multiple databases, arranged to
+capture sensitivity and specificity in sequence: breadth so nothing is
+missed, gates so nothing false gets through.
+
 **NO_HIERARCHY is a reported state with its reason.** Seven conditions
 have no parent in ANY source — and they are exactly the trial
 populations plus the non-condition. **That is a CATEGORY FACT, not a
@@ -234,7 +284,28 @@ number picked would be unjustified by the data. The rule is therefore
 not a margin at all: it is the SAME evidentiary standard already used
 for endpoints. Two independent sources, or it does not count.
 
-## 9. Hard-won lessons (each cost a wrong answer)
+## 9. Design evolution driven by data
+
+Each of these changed because a plausible approach produced a wrong
+answer on real data. None was designed a priori.
+
+**A shared parent is not a real sibling — work with what the source
+publishes.** A naive rule ("two conditions share a parent, so they are
+siblings") surfaced cystic fibrosis as a sibling of Gaucher disease.
+They are not clinically related; what they share is one SNOMED parent,
+"Autosomal recessive hereditary disorder" — an inheritance-pattern
+grouping, not a disease family. By that logic every recessive disease
+would be a sibling of every other. The fix is not to override SNOMED but
+to read it more carefully: SNOMED publishes DEFINING ATTRIBUTES (finding
+site, morphology, and so on) that a real disease concept carries and a
+pure grouper does not. Heart failure has 3; malignant neoplasm of lung
+has 2; "Autosomal recessive hereditary disorder" has 0. So a sibling
+that rests only on a zero-attribute grouper is not surfaced — which
+keeps congestive/chronic heart failure and drops Gaucher/cystic
+fibrosis. This is the SPECIFICITY arm doing its job: the sources found
+the candidate, a categorical gate (present-or-absent, not a tuned
+threshold) removed the false one. You do not get to redesign SNOMED; you
+use what it already publishes.
 
 **MONDO is a peer, not a gatekeeper.** Requiring a MONDO xref before a
 hit could count returned UNRESOLVED for Sarcopenia — matched exactly by
@@ -301,11 +372,29 @@ cannot tell them apart from a blank.
 
 ## 12. Next
 
-1. **SPEC.md** — for FDA's engineers. What each tool takes, returns,
-   guarantees, and refuses to do.
-2. **A document renderer** — what a USER sees, not a JSON dump. A
-   backend demo is more credible in a terminal; a rendered entry is more
-   persuasive to a communications office. Build both.
+Done since the last revision: SPEC.md (the engineer-facing tool
+contracts), the COA-focused orchestrator with its instant-demo cache,
+the drug-resolution and COA-to-drug tools, and the defining-attributes
+sibling gate. Remaining:
+
+1. **Finish the full reconciliation orchestrator** — the expansive
+   everything-view, polished to match the COA orchestrator's output
+   quality.
+2. **Additional entry points (doors), all routing through the same
+   identity engine.** The system currently answers "disease -> COAs."
+   The same machinery answers other questions, each buildable without
+   new relationship logic:
+   - **COA-name / abbreviation search.** Type an instrument ("KCCQ") and
+     get its record — what it is qualified for, its context of use, its
+     trials, its status. The inverse of the disease search.
+   - **The full list.** Show every COA in the catalog. Trivial — the
+     catalog is already loaded — and the first thing a reviewer will
+     ask for.
+   - **Related COAs.** From a COA, walk to its disease and out to
+     related conditions' COAs. Note honestly: COAs have no taxonomy of
+     their own, so "related COAs" means "COAs for related conditions,"
+     routed through the disease layer already built — not a COA
+     taxonomy invented here.
 3. **The one-pager** — last, distilled from everything above.
 
 ## 13. PARKING LOT
