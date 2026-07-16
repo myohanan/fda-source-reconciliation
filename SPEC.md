@@ -1,36 +1,34 @@
 # SPEC.md — FDA Source Reconciliation
 
-**For engineers. What each tool takes, what it returns, what it
-guarantees, and what it refuses to do.**
+For engineers: what each tool takes, what it returns, what it
+guarantees, and what it refuses to do.
 
 ---
 
-## 0. The contract
+## 0. The stucutre
 
 Single-function tools with sealed handoffs. Each does exactly one
-thing, emits a sealed result, and never reaches into another's
-business.
+thing, emits a sealed result.
 
-**No tool re-derives what an earlier tool determined.** The
-orchestrator routes; it does not adjudicate. This is not a style
-preference — it is what makes every output traceable to the authority
-that produced it.
+No tool re-derives what an earlier tool determined. The orchestrator
+routes; it does not adjudicate. That is what keeps every output
+traceable to the authority that produced it.
 
-**There is no generative step anywhere in the pipeline.** Key joins,
-coded lookups, typed-field gates, vote counts over declared
-vocabularies. A reviewer can walk any determination back to its cause.
+There is no generative step anywhere in the pipeline: key joins, coded
+lookups, typed-field gates, vote counts over declared vocabularies. A
+reviewer can walk any determination back to its cause.
 
-**No synonym list is created or maintained — ever.** Identity and
-relationships are resolved through published vocabularies (~200 in
-UMLS) and taxonomies (six hierarchy sources). "CHF," "congestive heart
+No synonym list is created or maintained. Identity and relationships
+are resolved through published vocabularies (~200 in UMLS) and
+taxonomies (six hierarchy sources), so "CHF," "congestive heart
 failure," and "carcinoma of lung" resolve without anyone writing a
 mapping. When FDA adds a COA condition, nobody adds synonyms; when a
 user types a lay term or an alternate phrasing, resolution and the
-hierarchy handle it. This is the maintainability guarantee: the system
-scales as vocabularies and the catalog grow, with no human-curated
-synonym table to maintain, drift, or leave incomplete. A synonym list
-is precisely what this architecture exists to avoid — it would be
-unmaintainable at the scale of medicine and wrong at the edges.
+hierarchy handle it. The benefit is maintainability: the system scales
+as the vocabularies and the catalog grow, with no synonym table to keep
+current. A synonym list is a reasonable approach for a small, stable
+vocabulary; at the scale of medicine, drawing on the published
+vocabularies avoids the upkeep it would take to build and maintain one.
 
 ---
 
@@ -47,7 +45,7 @@ clinical).
       status              see below
       cui                 UMLS Concept Unique Identifier
       label               the concept's preferred name
-      semantic_types      what KIND of thing this is
+      semantic_types      what kind of thing this is
       sources             which vocabularies named it
       n_sources           how many
       mondo_id            if MONDO carries it
@@ -56,7 +54,7 @@ clinical).
       near_misses         every refusal, with its reason
     }
 
-**Statuses, and what each MEANS:**
+**Statuses, and what each means:**
 
 | Status | Meaning |
 |---|---|
@@ -64,16 +62,16 @@ clinical).
 | `RESOLVED_AS_TRIAL_POPULATION` | No vocabulary carries it; ClinicalTrials.gov registers it. It is an enrollment definition, not a disease entity. |
 | `RESOLVED_FROM_MULTINAME` | The field held several names for one disease; all resolved to the same concept. |
 | `RESOLVED_BY_GUIDANCE` | Defined by a cited FDA guidance, not by any terminology. |
-| `CONFLICT_DETECTED` | Two or more concepts survived and no authority could adjudicate. **A human decides. The tool does not guess.** |
+| `CONFLICT_DETECTED` | Two or more concepts survived and no authority could adjudicate. A human decides; the tool does not guess. |
 | `NOT_A_CONDITION` | Hits exist but every one failed the semantic gate. The string names a gene, a procedure, a questionnaire, or a chart observation. |
 | `UNRESOLVED` | Nothing in ~200 vocabularies, nothing in the registry, no cited guidance. |
 
 **Guarantees:**
 - Exact match only. No ranked hits, no fuzzy scoring.
-- Every candidate is gated by its **semantic type** — a field the
-  authority publishes, not a rule we wrote.
-- A concept needs **two independent vocabularies** naming it to be a
-  contender. One is not evidence.
+- Every candidate is gated by its semantic type — a field the authority
+  publishes, not a rule written by hand.
+- A concept needs two independent vocabularies naming it to be a
+  contender. One is not enough.
 - Every refusal is logged in `near_misses`, with its source and reason.
 
 **Refuses to:**
@@ -98,29 +96,29 @@ clinical).
       note           on NO_COA, the honest statement
     }
 
-**The join is on whatever identity the resolver settled on** — a CUI, or
-a normalized trial-population name. Not on a CUI alone. An earlier
+The join is on whatever identity the resolver settled on — a CUI, or a
+normalized trial-population name. Not on a CUI alone. An earlier
 version joined on CUI only and silently abandoned the seven conditions
 that ClinicalTrials.gov had resolved.
 
-**`NO_COA` is a first-class answer, not a failure.** It reads:
+`NO_COA` is a first-class answer, not a failure. It reads:
 
     Resolved to C0006142 (Malignant neoplasm of breast). Checked all 52
     distinct conditions in the FDA COA catalog. FDA has no qualified or
     in-process clinical outcome assessment for this condition.
 
-**`CONDITION_UNRESOLVED` is a DIFFERENT fact** and says so:
+`CONDITION_UNRESOLVED` is a different fact, and says so:
 
-    This is NOT a statement that FDA has no COA -- it is a statement
+    This is not a statement that FDA has no COA -- it is a statement
     that we could not determine what disease this is.
 
-Those two are indistinguishable from a blank. The distinction is the
-whole point.
+Those two are indistinguishable from a blank, so the distinction is
+stated explicitly.
 
-**Context of use:** the catalog's column is a lossy summary. The KCCQ's
+Context of use: the catalog's column is a lossy summary. The KCCQ's
 reads "Patients with CHF." Its qualification statement reads "stage C &
-D heart failure, NYHA Classes I-IV, HFpEF or HFrEF." **The document
-governs.** This tool points at it and does not summarize it.
+D heart failure, NYHA Classes I-IV, HFpEF or HFrEF." The document
+governs; this tool points at it rather than summarizing it.
 
 ---
 
@@ -132,22 +130,22 @@ governs.** This tool points at it and does not summarize it.
     EXACT | PARENT | CHILD | SIBLING | ANCESTOR | DESCENDANT
     UNRELATED | NO_HIERARCHY
 
-**Six sources are asked** (SNOMED, MeSH, NCIt, ICD-10-CM, MedDRA,
-MONDO). **Convergence decides.** One source cannot overrule three.
+Six sources are asked (SNOMED, MeSH, NCIt, ICD-10-CM, MedDRA, MONDO),
+and convergence decides: one source cannot overrule three.
 
-**`NO_HIERARCHY` is a reported state with its reason.** Seven of FDA's
-54 conditions have no parent in ANY source — and they are exactly the
-trial populations. **That is a category fact, not a coverage gap.** A
-trial enrollment definition has no taxonomic parent because it is not
-the kind of thing that has one.
+`NO_HIERARCHY` is a reported state with its reason. Seven of FDA's 54
+conditions have no parent in any source — and they are exactly the
+trial populations. That is a category fact, not a coverage gap: a trial
+enrollment definition has no taxonomic parent because it is not the
+kind of thing that has one.
 
 **The defining-attributes sibling gate (SNOMED).** A sibling is inferred
-THROUGH a shared parent, so it is only as meaningful as that parent. Two
+through a shared parent, so it is only as meaningful as that parent. Two
 diseases that share a real disease-family parent are siblings; two that
-share only a *classification axis* — an inheritance pattern, a body-site
+share only a classification axis — an inheritance pattern, a body-site
 grouping, a generic "disorder" node — are not. The discriminator is
-SNOMED's own concept model: a parent with at least one **defining
-attribute** (finding site, associated morphology, etc.) is a clinical
+SNOMED's own concept model: a parent with at least one defining
+attribute (finding site, associated morphology, etc.) is a clinical
 entity; a parent with none is a grouper.
 
     Heart failure (84114007)                     3 defining attributes  → real
@@ -159,23 +157,23 @@ A SNOMED sibling whose shared parents are all groupers is resolved to
 `UNRELATED`. This keeps congestive/chronic heart failure (shared parent
 "Heart failure," defined) while dropping the Gaucher-disease/cystic-
 fibrosis false sibling (shared parent "Autosomal recessive hereditary
-disorder," a grouper). It is a **published, categorical** gate — the
-presence or absence of a concept model, not a threshold on a count — and
-it is the hierarchy analogue of the resolver's semantic-type gate. The
+disorder," a grouper). It is a published, categorical gate — the
+presence or absence of a concept model, not a threshold on a count —
+and it is the hierarchy analogue of the resolver's semantic-type gate. The
 defined/grouper map is built once by `build_defining_attributes.py` (see
 below) and read from `fda_data/snomed_defined.json`; if that file is
 absent the gate disables cleanly and the pre-gate behavior returns.
 
 **Refuses to:**
-- Report shared REMOTE ancestry as a relation. Every concept shares the
+- Report shared remote ancestry as a relation. Every concept shares the
   root. Congestive and chronic heart failure share twenty SNOMED
   ancestors including "Disorder of thorax." That is not a relationship.
 - Report a sibling that rests only on a grouper parent (see the gate
   above). Sharing a classification axis is not a relationship.
-- Say an instrument APPLIES. Surfacing a neighbor is navigation, not
+- Say an instrument applies. Surfacing a neighbor is navigation, not
   authorization. Whether a COA qualified for chronic heart failure is
-  valid in an acute decompensated trial is a **regulatory judgment**,
-  and FDA makes it, not this tool.
+  valid in an acute decompensated trial is a regulatory judgment, and
+  FDA makes it, not this tool.
 
 ---
 
@@ -191,7 +189,7 @@ plus the catalog of sealed conditions.
       cui           the identity searched from
       neighbors[]   condition, cui, relation, agreeing_sources
       note          on any empty status, the honest reason
-      degraded_sources[]   sources whose lookup FAILED this search,
+      degraded_sources[]   sources whose lookup failed this search,
                            recorded for calibration, per source
     }
 
@@ -199,21 +197,20 @@ Runs only when coa_lookup found no COA for the user's condition. It
 answers: FDA has nothing for your disease -- does it have something for
 a related one, and how is it related?
 
-**Statuses, and what each MEANS:**
+**Statuses, and what each means:**
 
 | Status | Meaning |
 |---|---|
 | `NEIGHBORS_FOUND` | One or more catalog conditions relate structurally. Each is surfaced with its relation and the sources that agreed. |
 | `NO_NEIGHBOR_IN_CATALOG` | The identity HAS a CUI, the six-source search ran to completion against every catalog condition, and none related. A verified absence -- checked, found none -- not a blank. |
-| `NO_HIERARCHY` | The identity has no CUI (a trial population, a guidance-defined construct). It cannot be related because it is not the kind of thing that has a taxonomic parent. **A category fact, not a coverage gap.** |
+| `NO_HIERARCHY` | The identity has no CUI (a trial population, a guidance-defined construct). It cannot be related because it is not the kind of thing that has a taxonomic parent. A category fact, not a coverage gap. |
 
 **The canonical-object principle.** Every catalog condition was resolved
 once, at catalog build, into a sealed identity. The user's disease was
 resolved once, in Step 1. This tool compares a sealed CUI against sealed
-CUIs. It never reads a neighbor's NAME and never calls
-condition_resolver. Identity is a settled upstream concern; a downstream
-step that re-solves it is the anti-pattern this architecture exists to
-avoid.
+CUIs. It never reads a neighbor's name and never calls
+condition_resolver. Identity is a settled upstream concern; a
+downstream step does not re-solve it.
 
 **Guarantees:**
 - Every comparison uses `hierarchy_matcher` -- six sources, convergence
@@ -222,15 +219,15 @@ avoid.
 - Only immediate structural relations are reported -- parent, child,
   sibling, bounded ancestry. Never remote shared ancestry (section 3).
 - Every empty result carries its reason. `NO_NEIGHBOR_IN_CATALOG` and
-  `NO_HIERARCHY` are DIFFERENT facts and say so.
-- A source that ANSWERS "does not carry this concept" has not voted --
-  a content condition, not a degradation. A source that ERRORS is a
+  `NO_HIERARCHY` are different facts and say so.
+- A source that answers "does not carry this concept" has not voted --
+  a content condition, not a degradation. A source that errors is a
   degradation, recorded in `degraded_sources` for calibration, per
   source. The two are never collapsed.
 
 **Refuses to:**
 - Attach COAs. That is neighbor_coa_lookup's job.
-- Say a surfaced instrument APPLIES. Navigation, not authorization --
+- Say a surfaced instrument applies. Navigation, not authorization --
   the regulatory judgment is FDA's.
 - Relate a CUI-less identity. Returns `NO_HIERARCHY` with its reason.
 - Stop the run on a source failure. It degrades that source to a
@@ -250,7 +247,7 @@ catalog.
                       coas[]   the COAs the catalog holds for this
                                neighbor's CUI -- instrument, concept,
                                context_of_use, coa_type, stage,
-                               qualified. VERBATIM from the catalog.
+                               qualified. Verbatim from the catalog.
     }
 
 Finding a related condition and attaching its COAs are two jobs, kept in
@@ -261,10 +258,10 @@ two tools, so a failure in one is diagnosable without reading the other.
   summarized -- the document governs (section 2).
 - The relation and CUI from neighbor_lookup pass through SEALED and
   unchanged. This tool does not re-compute a relation.
-- A neighbor whose catalog entry holds no COAs is KEPT, with
+- A neighbor whose catalog entry holds no COAs is kept, with
   `coas: []` -- a stated empty, not a silent drop. "A sibling exists and
   it too has no COA" is a verified fact about the neighborhood. What to
-  DISPLAY of these is a presentation concern (the finding), not this
+  display of these is a presentation concern (the finding), not this
   tool's -- the tool reports completely.
 
 **Refuses to:**
@@ -277,28 +274,27 @@ two tools, so a failure in one is diagnosable without reading the other.
 ## 6. drug_lookup
 
 **Input:** a sealed condition object.
-**Output:** approved drugs, by TWO independent routes.
+**Output:** approved drugs, by two independent routes.
 
     ROUTE 1  CODED    ApplNo -> rxcui -> MED-RT may_treat -> MeSH -> CUI
     ROUTE 2  PROSE    ApplNo -> openFDA indications_and_usage -> text
 
-**They are not a primary and a backup. They answer different
-questions.**
+They are not a primary and a backup; they answer different questions.
 
 - **Coded** is fully coded; no text is read. But MED-RT's `may_treat` is
-  BROADER than an approved indication — it captures off-label and
+  broader than an approved indication — it captures off-label and
   class-level use, and returns artifacts (aripiprazole `may_treat` "Drug
   Hypersensitivity", a contraindication).
 - **Prose** is the approved label — the regulatory truth. But it is a
-  **string match**, and that is the one place in this system a silent
-  false positive can enter.
+  string match, and that is the one place in this system a silent false
+  positive can enter.
 
-**Every drug carries which route found it.** The counts are never
+Every drug carries which route found it, and the counts are never
 merged. Cardiolite — a cardiac imaging agent — matches "breast" in its
 label; it appears in the prose-only bucket with its indication text
 printed, so a reader can see what it is.
 
-**Agreement is corroboration. Disagreement is a finding.**
+Agreement is corroboration; disagreement is a finding.
 
 ---
 
@@ -306,9 +302,9 @@ printed, so a reader can see what it is.
 
 **Input:** an instrument name.
 **Output:** every trial that registered it as an outcome measure — with
-**the verbatim outcome text.**
+the verbatim outcome text.
 
-**Never a boolean. Never a count alone.** That restraint was earned:
+Never a boolean, never a count alone. The reason:
 
     FDA's qualified asthma COA is the Asthma DAYTIME Symptom Diary
     (6 items, 0-10, C-Path).
@@ -316,16 +312,16 @@ printed, so a reader can see what it is.
     NAVIGATOR -- the pivotal Phase 3 that got Tezspire approved --
     registered "Change from baseline in Asthma Symptom Diary."
 
-    IT IS A DIFFERENT INSTRUMENT. Ten items, scored 0-4, Globe et al
+    It is a different instrument: ten items, scored 0-4, Globe et al
     2015.
 
-    A string matcher called it a hit. It looked like a hit. Nothing
-    about the output would have looked broken.
+    A string matcher called it a hit, and nothing about the output would
+    have looked broken.
 
-**Reconciliation:** the retrieved count is checked against the
-registry's reported total. An incomplete retrieval is an **error**, not
-a shrug. If the registry reports no total, completeness cannot be
-verified — and that is also not OK.
+Reconciliation: the retrieved count is checked against the registry's
+reported total. An incomplete retrieval is reported as an error, not
+passed over. If the registry reports no total, completeness cannot be
+verified, and that is reported too.
 
 ---
 
@@ -344,16 +340,16 @@ The canonical-object pattern applied to drugs, exactly parallel to
 condition_resolver applied to diseases: a free-text string is not an
 identity. ClinicalTrials.gov intervention names are messy — "Dapagliflozin",
 "Dapagliflozin 10mg Tab", "Dapagliflozin (Forxiga)", "dapagliflozine" are
-one drug written nine ways. Each resolves to its RxNorm **ingredient**
-rxcui, so the nine collapse to one. **Combinations keep all ingredients**
+one drug written nine ways. Each resolves to its RxNorm ingredient
+rxcui, so the nine collapse to one. Combinations keep all ingredients
 sorted into one canonical key: "sacubitril/valsartan" stays distinct from
 either single drug; "LCZ696 (sacubitril/valsartan)" folds in via its
 parenthetical.
 
 **Guarantees:**
 - Controls fall out because they do not resolve to a drug ingredient —
-  a **principled** test, not a maintained blocklist of phrases.
-- An investigational drug RxNorm lacks is KEPT and labeled
+  a principled test, not a maintained blocklist of phrases.
+- An investigational drug RxNorm lacks is kept and labeled
   `NOT_IN_RXNORM`, never silently dropped. "Could not resolve" and "not
   a drug" are different facts with different names.
 - Same RxNav access pattern as `download_rxnorm_indications` (no key,
@@ -364,27 +360,89 @@ parenthetical.
 ## 7b. coa_drug_link
 
 **Input:** a COA instrument name.
-**Output:** the FDA-APPROVED drugs whose trials used the instrument.
+**Output:** the FDA-approved drugs whose trials used the instrument.
 
 Given a COA instrument, finds the ClinicalTrials.gov trials that
 registered it as an outcome measure, reads each trial's DRUG/BIOLOGICAL
 interventions, resolves each via `drug_resolver` to a canonical
 ingredient, and reports the approved ones with a per-drug trial count.
 
-**This is a CO-OCCURRENCE claim and nothing more.** "This drug was
-tested in trials that used this COA." It does **not** claim the drug was
-approved on the basis of the COA, or that the COA was a pivotal
-endpoint — the COA may have been secondary or exploratory. The same
-flat-statement-of-fact discipline the rest of the system uses.
+This is a co-occurrence claim and nothing more: the drug was tested in
+trials that used this COA. It does not claim the drug was approved on
+the basis of the COA, or that the COA was a pivotal endpoint — the COA
+may have been secondary or exploratory. Same flat-statement-of-fact
+discipline as the rest of the system.
 
 **Guarantees:**
 - Filtered to FDA-approved drugs (openFDA approved-label set, matched at
-  ingredient level). Investigational/discontinued compounds drop out
-  because they are not approved — the meaningful filter, not a label
-  quibble.
-- If the approved set cannot load, approval status is `UNKNOWN` and NO
+  ingredient level). Investigational or discontinued compounds drop out
+  because they are not approved.
+- If the approved set cannot load, approval status is `UNKNOWN` and no
   filtering runs (all drugs shown, labeled) — never a false "unapproved."
 - Standalone. It does not touch the reconciliation orchestrator.
+
+---
+
+## 7c. trial_instruments  (PROTOTYPE)
+
+**Input:** a disease name and its approved-drug generic names.
+**Output:** the outcome measures those drugs' trials used, each flagged
+qualified COA / CDISC-recognized instrument / other, with trial counts.
+
+For a disease's approved drugs, pulls the ClinicalTrials.gov trials and
+their registered outcome measures, and classifies each measure against
+two published lists: the qualified-COA catalog and CDISC's instrument
+terminology (`fda_data/cdisc_instruments.csv`). Matches are
+word-boundary (a short acronym like "ESS" cannot match inside
+"assessment"); scaffolding terms (CTCAE, adverse-event, PK, vital-sign)
+are excluded from the instrument buckets. Near-duplicate phrasings of
+the same instrument collapse under one canonical name.
+
+**Co-occurrence only** — an instrument appeared as an outcome measure in
+a trial of an approved drug; never a claim the drug was approved on it.
+The qualified/not flag is factual (is it in FDA's qualified set), not a
+verdict on the instrument's value.
+
+**Status: PROTOTYPE.** The classification is only as good as the string
+alignment between trial phrasing and CDISC's canonical names; CDISC's
+terminology is questionnaire-weighted and thin on performance tests, so
+some real instruments fall to "other." It surfaces the shape of what a
+disease's trials measured; it is not a demo centerpiece. The empirical
+finding it produced (e.g. no DMD approval trial used a qualified COA)
+was verified manually and does not depend on the tool.
+
+---
+
+## 7d. group_measures  (utility)
+
+**Input:** a flat list of outcome-measure titles.
+**Output:** the same titles grouped under shared leading words.
+
+A readability utility: titles that share their first N words are
+grouped under one header, so a long dump becomes a short set of headers.
+Pure text grouping — no classification, no external authority, tunable
+by word count. Used to make a long measure list scannable.
+
+---
+
+## 7e. list_coas
+
+**Input:** optional filters (`--search`, `--stage`, `--type`,
+`--submissions`, `--compendium`).
+**Output:** a count summary, then the matching COAs from both resources.
+
+The full-list / search view over FDA's two COA resources —
+`coa_submissions.csv` (the qualification pipeline, grouped by stage) and
+`coa_compendium.csv` (the finished/qualified set). Every query leads
+with a count summary (stage and type breakdown) and then the full
+grouped listing; a front end decides how much to reveal. Filters are
+composable. Reads both files with a proper CSV parser (context-of-use
+fields carry embedded commas). The two resources share no key — showing
+them together is the point.
+
+**This tool covers three doors at once:** the full list (no args), COA-
+name / instrument search (`--search "SDMT"`), and filtered browsing
+(`--stage`, `--type`). No separate COA-name lookup is needed.
 
 ---
 
@@ -405,22 +463,22 @@ They share every underlying tool; they differ in scope and framing.
 
 ### 8a. reconciliation_orchestrator
 
-**Fixed sequence. Sealed handoffs. Degradation, not halt.**
+Fixed sequence, sealed handoffs, degradation rather than halt.
 
-    Step 1   condition_resolver     SEALED IDENTITY
+    Step 1   condition_resolver     sealed identity
     Step 2   coa_lookup
-             neighbor_lookup        ONLY if Step 2 found nothing
-             neighbor_coa_lookup    ONLY if neighbors were found
+             neighbor_lookup        only if Step 2 found nothing
+             neighbor_coa_lookup    only if neighbors were found
     Step 3   drug_lookup
-    Step 4   endpoint_search        ONLY if Step 2 found a COA
+    Step 4   endpoint_search        only if Step 2 found a COA
     Step 5   the finding            assembled, not re-reasoned
 
-**The neighbor search is suppressed when a COA exists.** Ranging outward to offer
-alternatives would substitute the system's judgment for FDA's, on
+The neighbor search is suppressed when a COA exists. Ranging outward to
+offer alternatives would substitute the system's judgment for FDA's, on
 criteria nobody gave it.
 
-**A tool that fails degrades to a sealed UNKNOWN and the pipeline
-continues. It does NOT emit a false negative.**
+A tool that fails degrades to a sealed UNKNOWN and the pipeline
+continues; it does not emit a false negative.
 
     "We checked and FDA has no COA"     and
     "We could not check"
@@ -431,11 +489,11 @@ a blank. The schema records which one happened, in `steps` and
 
 ### 8b. coa_orchestrator
 
-**Same tools, COA-shaped scope. Cache-backed for demos.**
+Same tools, COA-shaped scope. Cache-backed for demos.
 
     resolve → coa_lookup
               (if no own COA) neighbor_lookup + neighbor_coa_lookup
-              PER COA INSTRUMENT in the picture:
+              per COA instrument in the picture:
                   endpoint_search   → its trials, primary vs secondary
                   coa_drug_link     → approved drugs those trials tested
               (no COA anywhere)     → honest empty; no drugs, no trials
@@ -443,10 +501,10 @@ a blank. The schema records which one happened, in `steps` and
 Every drug and trial traces to a COA. A disease with its own COA shows
 that COA's evidence; a disease with none shows a related condition's COA
 (sibling/child/ancestor) with the same evidence; a disease with no COA
-anywhere gets the plain "nothing here, nothing nearby" — which is the
-exact fact FDA's own page cannot state.
+anywhere gets the plain "nothing here, nothing nearby" — a verified
+absence, stated as such.
 
-**Qualified-but-unused COAs are a finding, not noise.** A qualified COA
+Qualified-but-unused COAs are a finding, not noise. A qualified COA
 that no trial ever used (zero trials in the registry) is surfaced as
 such — FDA vetted an instrument nobody picked up. The display collapses
 these into a summary line rather than empty blocks.
@@ -456,11 +514,11 @@ the APIs (ClinicalTrials.gov, RxNav, openFDA, UMLS). For sharing and
 demonstration, the COA results are pre-built into a local JSON
 (`fda_data/coa_cache.json`) by `build_coa_cache.py`, so queries render
 instantly with no network calls. `coa_orchestrator.run_cached` reads the
-cache when the query is present and runs live otherwise. **There are
-only 54 COA conditions**, so precomputing the entire universe is trivial
-— this is not a workaround for a large dataset, it is that the whole
-space is small enough to cache completely. The same JSON doubles as a
-deterministic, offline **test fixture**.
+cache when the query is present and runs live otherwise. There are only
+54 COA conditions, so precomputing the entire set is straightforward —
+not a workaround for a large dataset, simply a space small enough to
+cache completely. The same JSON doubles as a deterministic, offline
+test fixture.
 
 ### 8c. Index and cache builders
 
@@ -481,9 +539,7 @@ of how they were produced.
 
 ---
 
-## 9. What the system will NOT do
-
-This section matters more than the others.
+## 9. What the system will not do
 
 - **It will not recommend.** It surfaces what exists and names the
   relation. Whether an instrument fits a trial is a regulatory and
@@ -509,7 +565,7 @@ This section matters more than the others.
 ## 10. Calibration
 
 Deterministic is not the same as reliable. Deterministic means same
-input -> same output. **Reliable means you actually GOT the input.**
+input, same output. Reliable means you actually got the input.
 
 FDA changes the DDT Salesforce structure and the scraper returns fewer
 rows — silently. An API call fails and a field is blank —
@@ -519,8 +575,8 @@ Each produces a system that appears to function: deterministic,
 reproducible, and wrong.
 
 So every refusal is logged. The near-miss log is not debug output — it
-is an instrument. **It has overturned three design decisions during
-development and confirmed a fourth.** Read it before loosening any
+is a calibration instrument. It has overturned three design decisions
+during development and confirmed a fourth. Read it before loosening any
 rule.
 
 ---
@@ -536,33 +592,33 @@ rule.
 | MONDO | bulk download | free |
 | Drugs@FDA | bulk download / openFDA | free |
 
-**No licensed data. No proprietary vocabularies. Nothing here cannot be
-rebuilt from public sources by anyone with the two free API keys.**
+No licensed data and no proprietary vocabularies. Everything here can
+be rebuilt from public sources by anyone with the two free API keys.
 
 ### Live APIs, not maintained files
 
-**The system is built to run on live API calls. It does not depend on
-downloading and keeping files up to date.** Identity resolution
-(UMLS), the hierarchy (SNOMED, MeSH, NCIt, ICD-10-CM, MedDRA — **all of
-which are UMLS source vocabularies**), trials (ClinicalTrials.gov),
+The system is built to run on live API calls; it does not depend on
+downloading and keeping files up to date. Identity resolution (UMLS),
+the hierarchy (SNOMED, MeSH, NCIt, ICD-10-CM, MedDRA — all of which are
+UMLS source vocabularies), trials (ClinicalTrials.gov),
 drug resolution (RxNav), and approvals (openFDA) are all live external
 authorities, maintained by NLM / NIH / FDA, not by this project. When
 those authorities update, the system gets the update through the API —
 there is nothing local to refresh.
 
-**The one exception is MONDO**, which is an OBO ontology, not a UMLS
-source vocabulary, so it is the single dataset that requires its own
-periodic download. Everything else is live.
+The one exception is MONDO, which is an OBO ontology, not a UMLS source
+vocabulary, so it is the single dataset that requires its own periodic
+download. Everything else is live.
 
 ### Generated local artifacts — a redundant speed cache
 
-The local JSON indexes below **add no data.** They are cached copies of
+The local JSON indexes below add no data. They are cached copies of
 UMLS/SNOMED content (and precomputed results) that the APIs already
 serve live. They exist for one reason: walking the hierarchy live, per
 query, cost ~110 seconds; served from a local index it is ~1 second.
-**Pull these files and the system still runs — it just falls back to
-the live UMLS API and is slower.** They are a performance choice, not a
-data dependency, and each is rebuilt mechanically from a public release
+Remove these files and the system still runs — it falls back to the
+live UMLS API and is slower. They are a performance choice, not a data
+dependency, and each is rebuilt mechanically from a public release
 (no hand-curation, no judgment call).
 
 | Artifact | Built by | Caches |
