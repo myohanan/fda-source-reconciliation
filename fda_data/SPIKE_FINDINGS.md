@@ -198,6 +198,39 @@ of thing that has one.
 
 ---
 
+## 7a. A shared parent is not enough — the false-sibling problem
+
+Breadth across six taxonomies gives **sensitivity**: it finds every
+relationship any source records. But a naive "they share a parent, so
+they are siblings" rule finds relationships that are not real.
+
+**The case that exposed it:** Gaucher disease surfaced cystic fibrosis
+as a sibling. They are not clinically related. What they share is a
+single SNOMED parent — "Autosomal recessive hereditary disorder" — an
+**inheritance-pattern grouping**, not a disease family. By the same
+logic every recessive disease would be a sibling of every other.
+
+The discriminator turned out to be published in SNOMED itself. A real
+disease concept carries **defining attributes** (finding site,
+associated morphology, and so on); a pure grouper carries none.
+
+| Shared parent | Defining attributes | Verdict |
+|---|---|---|
+| Heart failure | 3 | real disease family |
+| Malignant neoplasm of lung | 2 | real disease family |
+| Autosomal recessive hereditary disorder | 0 | grouper |
+
+So the rule: a sibling that rests only on a zero-attribute grouper is
+**not** surfaced. This keeps congestive/chronic heart failure (shared
+parent "Heart failure," defined) and drops Gaucher/cystic fibrosis
+(shared parent a grouper). It is a **categorical** test — the presence
+or absence of a concept model — not a tuned threshold, and it is the
+hierarchy's answer to **specificity**: breadth finds the candidates, the
+defining-attributes gate removes the false ones. Sensitivity from the
+six sources; specificity from the gate.
+
+---
+
 ## 8. Why the four sources cannot be connected as they stand
 
 | Source | How it is maintained |
@@ -243,6 +276,44 @@ cause: MONDO's `xref_mesh` is **EMPTY** for MONDO:0007254, while RxNorm
 links 826 rxcuis to MeSH D001943. The data was on disk. The BRIDGE was
 missing — for the most common cancer in American women. Fixed by asking
 UMLS directly: it IS the metathesaurus.)*
+
+---
+
+## 9a. A COA can be linked to the drug development it served
+
+§3 showed FDA cannot see which of its COAs are *used*. The trial
+registry can close part of that gap directly: a trial names both its
+interventions and its outcome measures, so a single trial record ties a
+drug to a COA — this trial tested empagliflozin AND used the KCCQ.
+
+Run that link for the KCCQ (chronic heart failure's qualified
+instrument):
+
+| Drug | Trials using the KCCQ that tested it |
+|---|---|
+| empagliflozin | 18 |
+| dapagliflozin | 14 |
+| sacubitril/valsartan | 12 |
+| mavacamten | 7 |
+| finerenone, ferric carboxymaltose, enalapril | 6 each |
+
+These are the modern heart-failure armamentarium. The KCCQ is not a
+form sitting in a drawer — it is the instrument the pivotal trials of
+these approved drugs measured with. That is the connection none of the
+four resources hold: they record that the KCCQ was *qualified*; the
+registry records that it was *used*, and by whom.
+
+**Stated precisely, because the discipline matters:** this is
+**co-occurrence** — the drug was tested in a trial that used the COA. It
+is **not** a claim that the COA drove the approval, or was even the
+primary endpoint. Whether the COA figured in any approval is a
+regulatory fact the registry does not carry and the tool does not
+assert. The drugs are filtered to FDA-approved ones (via openFDA);
+investigational and discontinued compounds are dropped, because "the
+KCCQ was used in a trial of a drug that never reached market" does not
+speak to the approved armamentarium. The honest tail remains visible:
+single-trial, adjacent studies (a sleep drug in a heart-failure
+population) appear at the bottom, labeled as what they are.
 
 ---
 
