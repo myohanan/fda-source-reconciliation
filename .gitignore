@@ -33,3 +33,6 @@ fda_data/cui_index.json
 fda_data/cui_code_index.json
 fda_data/cui_snomed_index.json
 fda_data/hierarchy_index.json
+fda_data/snomed_defined.json
+drug_resolve_cache.json
+fda_data/drug_resolve_cache.json
