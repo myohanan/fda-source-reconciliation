@@ -201,23 +201,41 @@ def run(query: str, context: dict, catalog: dict,
         coa_result.get("status") == coa.STATUS_FOUND) else []
     schema["own_coas"] = own
 
+    # Only a QUALIFIED own-COA counts as this condition having a COA.
+    # An own-COA that is only an in-process submission (qualified is
+    # False -- e.g. still at Letter of Intent) is NOT a qualified COA
+    # for this disease, so it is not shown as one and does not suppress
+    # the neighbor search. The condition falls through to related
+    # conditions exactly as if it had no COA of its own.
+    own_qualified = [e for e in own if e.get("qualified")]
+
     coa_sources = []  # (coa_entry, source_label)
-    for entry in own:
+    for entry in own_qualified:
         coa_sources.append((entry, "this condition"))
 
-    # 2. If none of its own, look to related catalog conditions.
-    if not own and resolved.get("cui"):
+    # 2. If no QUALIFIED COA of its own, look to related conditions.
+    if not own_qualified and resolved.get("cui"):
         _progress("no COA here -- checking related conditions")
         neighbor_result = nl.find_neighbors(resolved, catalog)
         attached = ncl.attach_coas(neighbor_result, catalog)
         neighbors = attached.get("neighbors", [])
+        # Only QUALIFIED neighbor COAs may be surfaced. An in-process
+        # submission (qualified is False) is not a qualified COA whether
+        # it belongs to this condition or a neighbor -- the same rule
+        # applied to own-COAs above. In-process neighbor submissions are
+        # dropped, not lent across.
         for n in neighbors:
             for entry in n.get("coas", []) or []:
+                if not entry.get("qualified"):
+                    continue
                 label = (f'{n.get("condition", "")} '
                          f'({n.get("relation", "")} of your condition)')
                 coa_sources.append((entry, label))
         schema["neighbor_coas"] = [
-            n for n in neighbors if n.get("coas")]
+            {**n, "coas": [c for c in n.get("coas", [])
+                           if c.get("qualified")]}
+            for n in neighbors
+            if any(c.get("qualified") for c in n.get("coas", []))]
 
     # 3. No COA anywhere -> say so, show nothing on drugs/trials.
     if not coa_sources:
@@ -234,7 +252,8 @@ def run(query: str, context: dict, catalog: dict,
         _progress(f'evidence for {entry.get("instrument", "")[:40]}')
         schema["coa_blocks"].append(_coa_block(entry, source_label))
 
-    schema["status"] = "COA_FOUND" if own else "NEIGHBOR_COA_FOUND"
+    schema["status"] = ("COA_FOUND" if own_qualified
+                        else "NEIGHBOR_COA_FOUND")
     return schema
 
 
@@ -363,16 +382,18 @@ def _print_schema(schema: dict) -> None:
     # a real finding -- FDA vetted an instrument nobody picked up -- but
     # printed as an empty block it just looks like noise, so the unused
     # ones are collapsed into one summary line after the used ones.
+    # A block prints if it is QUALIFIED or was USED in trials. A
+    # qualified COA with zero trials is a real answer -- FDA vetted the
+    # instrument, no trial has used it yet -- and must show, not vanish.
+    # A non-qualified block with no trials is an in-process submission,
+    # not a COA for this disease, and is dropped.
     used_blocks = []
-    unused_labels = []
     for block in schema["coa_blocks"]:
         any_trials = any(
             item["evidence"]["trials"].get("retrieved", 0) > 0
             for item in block["instruments"])
-        if any_trials:
+        if block["qualified"] or any_trials:
             used_blocks.append(block)
-        else:
-            unused_labels.append(block["coa_label"])
 
     for block in used_blocks:
         print()
@@ -397,16 +418,6 @@ def _print_schema(schema: dict) -> None:
                   f'{len(drug_list)}')
             _print_drugs(drug_list)
 
-    if unused_labels:
-        print()
-        print(f'OTHER QUALIFIED COAs (no trials found using them): '
-              f'{len(unused_labels)}')
-        for lab in unused_labels:
-            print(f'     {lab}')
-        print('     These instruments are qualified/listed but no '
-              'trial in the')
-        print('     registry used them as an outcome measure -- vetted '
-              'but unused.')
     print()
 
 
