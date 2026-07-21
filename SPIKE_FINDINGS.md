@@ -251,6 +251,41 @@ six sources; specificity from the gate.
 
 ---
 
+## 7b. A shared parent is not the only false-sibling source — the vote must converge
+
+The defining-attributes gate (§7a) removes siblings that rest on a
+zero-attribute grouper. It does not, on its own, resolve a second class
+of false sibling: one source asserting a relationship that several
+others actively contradict.
+
+The case: "lung cancer" surfaced cystic fibrosis as a sibling. Under the
+hood, five sources voted — SNOMED, NCIt, ICD-10-CM, and MedDRA all
+computed UNRELATED; only MeSH called them siblings, via the coarse
+"Lung Diseases" grouping that lumps a carcinoma and a genetic disorder
+together. The relation is read across sources, so the question is how
+the votes resolve.
+
+The original tiebreak sorted any structural relation ahead of
+UNRELATED, so a single MeSH SIBLING beat four active UNRELATED votes.
+The fix: count agreeing sources first. A relation that only one source
+asserts cannot outweigh a majority of sources that looked and found no
+link. UNRELATED computed by four sources is a signal, not silence —
+distinct from NO_HIERARCHY (a source that does not carry the concept),
+which is genuine silence and never counts as a vote.
+
+| | Sources for SIBLING | Sources for UNRELATED | Verdict |
+|---|---|---|---|
+| lung cancer / cystic fibrosis | 1 (MeSH) | 4 | UNRELATED |
+| congestive / chronic heart failure | (real, defined parent) | | SIBLING |
+
+Verified against the known-good pairs: heart failure→chronic HF stays
+CHILD, congestive→chronic stays SIBLING, small cell→NSCLC stays
+SIBLING; only the false lung-cancer/CF sibling flips. §7a's gate and
+this vote rule are complementary: the gate removes siblings built on a
+grouper, the vote removes siblings built on a lone dissenting source.
+
+---
+
 ## 8. Why the four sources cannot be connected as they stand
 
 | Source | How it is maintained |
@@ -401,3 +436,117 @@ Three sources share the DDT COA number, spelled differently in each.
 - submissions & qualified: 0 overlap — disjoint by design
 - in DDT but neither COA file: 72 — projects the public COA pages do
   not show
+
+---
+
+## 13. Inactive SNOMED codes silently break relation lookups
+
+The relation engine reads is-a structure from SNOMED codes held in the
+curated index (`cui_code_index.json`). Some of those codes were
+inactive — retired concepts that the current SNOMED release no longer
+carries a hierarchy for. An inactive code does not error; it returns no
+parents and no children, so every relation computed from it comes back
+empty, and a condition with a real place in the hierarchy reads as
+having none.
+
+24 catalog conditions were affected, heart failure among them
+(inactive 155374007 → active 84114007). Each was repointed to the
+active concept, verified by name against the current US edition. The
+class is broader than the 24 fixed here: any CUI whose index entry
+predates a SNOMED retirement can carry a stale code. The durable fix is
+at index-build time — prefer the active concept when UMLS returns both —
+and is noted for a later pass; tonight's repoints correct the catalog
+conditions the demo touches.
+
+A second, related fault: `code_in` consulted the relation cache before
+the curated index, so even after a code was corrected the stale cached
+code shadowed it. `code_in` now reads the curated index first and falls
+to the cache only for CUIs the index does not carry.
+
+---
+
+## 14. Qualified and in-process COAs must be distinguished at display
+
+A COA in the submissions resource is a proposed instrument at some stage
+of qualification; only a qualified COA has cleared the bar (§1a, §12).
+The data carries the distinction cleanly (every entry has a `qualified`
+flag and a stage), but the display logic did not honor it, in two
+places:
+
+- The orchestrator treated any own-COA as "this condition has a COA,"
+  so a condition whose only COA is an in-process submission (e.g. small
+  cell lung cancer, #000133 at Letter of Intent) both suppressed the
+  neighbor search and then displayed an unqualified instrument as if it
+  were the answer. A condition now counts as having its own COA only
+  when that COA is qualified; otherwise it falls through to the
+  neighbor search, exactly as if it had none.
+- Neighbor COAs were not filtered the same way, so a search could
+  surface a *related* condition's in-process submission. The
+  qualified-only rule now applies to own and neighbor COAs alike — an
+  in-process submission is never surfaced as any condition's answer.
+
+This is a display-layer finding, not a data-layer one: the sources are
+honest about qualification status; the tool now is too. Note the effect
+on breadth — roughly 35 of the catalog conditions have only in-process
+COAs of their own (consistent with §1a's pipeline stall), so honoring
+the flag moves most of them to a neighbor answer or an honest
+"no qualified COA here."
+
+---
+
+## 15. The catalog view must match by identity and hierarchy, not text
+
+The list/search view (`list_coas`) originally matched on substring. That
+reproduces the Milliman failure directly: "small cell lung cancer" is a
+substring of "non-small cell lung cancer," so a search for one returned
+the other — two distinct diseases, different treatment, conflated by
+text.
+
+Exact-CUI matching was tried and is also wrong, in the opposite
+direction: it strips every subtype. "Heart failure" (C0018801) stops
+matching the KCCQ, which is filed under "Chronic Heart Failure"
+(C0264716, a child); "non-small cell lung cancer" drops "metastatic
+non-small cell lung cancer" (C0278987). A different CUI is not a
+non-match — it is a hierarchical neighbor. Exact identity is the same
+error as substring, just failing closed instead of open.
+
+The catalog view now does what the rest of the system does: resolve the
+query to an identity, then match each row by the relationship the
+vocabularies record — exact, parent, child, sibling — and label each
+result with that relationship. "Heart failure" surfaces the KCCQ marked
+[child]; "small cell lung cancer" surfaces NSCLC-SAQ marked [sibling],
+attributed to non-small cell, never asserted as small cell's own
+qualified COA. The relationship is not decoration; it is the mechanism
+that replaces a synonym list, and the label is how the reader sees why a
+row surfaced and whose COA it actually is.
+
+Non-disease queries (an instrument name, a concept word like "walk")
+do not resolve to a condition and fall through to substring — the
+correct behavior for a term that is not a disease. Typo handling is a
+front-end concern, not a backend match rule.
+
+---
+
+## 16. Two operational findings from wiring identity into the catalog view
+
+**The resolver requires the mondo context.** `condition_resolver.resolve`
+reads `context["mondo_terms"]`, built once by `load_sources()`. Called
+with an empty context it raises `KeyError('mondo_terms')` — not a
+resolution failure, a crash — on roughly 90 of 228 catalog disease
+names. This was a caller error (an empty context passed in), not a
+resolver defect, but it is a fragility worth noting: the resolver
+assumes a fully-built context and does not fail gracefully without one.
+With the context built correctly, 165 of 228 names resolve; the 63 that
+do not are almost entirely trial populations and non-disease strings
+(§6) — "Bowel prep," "Forehead lines," the seizure-disorder subtypes —
+which correctly have no single disease identity.
+
+**Relation lookups must be warmed, not computed live.** `relate()` serves
+SNOMED, ICD-10-CM, NCIt, and MedDRA from local indexes, but MeSH falls
+through to the live UMLS API with a rate-limit pause. A catalog search
+that calls `relate()` across every row hits that live path for every
+uncached MeSH code and appears to hang. The relation cache is designed
+to be pre-warmed (the orchestrator relies on exactly this); warming the
+catalog's condition pairs once populates it, after which search is
+local and instant. This mirrors the existing pattern — the disease→CUI
+map and the COA cache are both built once, offline, for the same reason.
