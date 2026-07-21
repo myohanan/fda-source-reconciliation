@@ -430,19 +430,18 @@ def code_in(cui: str, sab: str) -> str:
     """The source's own code for this concept, or empty."""
     if not cui or not cr.UMLS_API_KEY:
         return ""
-    cached = _code_cache.get((cui, sab))
-    if cached is not None:
-        return cached
-
-    # Local index first. It carries the same source code the API would
-    # return. Only when the index lacks this CUI do we fall through to
-    # the live API below.
+    # INDEX IS AUTHORITATIVE. The curated cui_code_index is the source
+    # of truth; a corrected index must never be shadowed by a stale
+    # cached code. Read it FIRST and return without writing to the cache.
+    # The cache below is only for CUIs the index does not carry.
     if _code_index:
         entry = _code_index.get(cui)
         if entry is not None:
-            code = entry.get(sab, "")
-            _code_cache[(cui, sab)] = code
-            return code
+            return entry.get(sab, "")
+
+    cached = _code_cache.get((cui, sab))
+    if cached is not None:
+        return cached
     code = ""
     try:
         atoms = _get(f"/content/current/CUI/{cui}/atoms",
@@ -622,8 +621,17 @@ def relate(cui_a: str, cui_b: str) -> dict:
     # UNRELATED still loses to any structural relation: a source that
     # finds no path has not asserted that none exists.
     def rank(relation: str) -> tuple:
-        structural = 1 if relation == REL_UNRELATED else 0
-        return (structural, -len(votes[relation]),
+        # CONVERGENCE FIRST: the relation with the MOST source votes
+        # wins. A source that actively computed UNRELATED HAS voted --
+        # four sources finding no sibling link outweigh one source that
+        # does, so a lone structural claim can no longer beat a majority
+        # of active UNRELATED votes (this is what let MeSH alone call
+        # lung cancer and cystic fibrosis siblings via "Lung Diseases").
+        # NO_HIERARCHY is genuine silence -- not carrying the concept --
+        # and is never counted as a vote here. On a tie, a structural
+        # relation still beats UNRELATED, and _RANK breaks any remainder.
+        is_unrelated = 1 if relation == REL_UNRELATED else 0
+        return (-len(votes[relation]), is_unrelated,
                 _RANK.get(relation, 9))
 
     winner = min(votes, key=rank)
